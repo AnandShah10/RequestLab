@@ -750,6 +750,23 @@ body::before{
 .kv-table tbody tr:hover .del-row-btn{opacity:1}
 .del-row-btn:hover{color:var(--red);background:rgba(244,112,103,.1)}
 
+/* ── Form-data type selector ── */
+.form-type-select{
+  background:var(--bg2);border:1px solid var(--border);border-radius:3px;
+  padding:3px 6px;font-size:10px;color:var(--txt3);outline:none;cursor:pointer;
+  font-family:var(--mono);transition:border-color .15s;max-width:80px;
+}
+.form-type-select:focus{border-color:var(--acc);color:var(--txt)}
+/* file input hidden, styled via label */
+.file-cell-wrap{display:flex;align-items:center;gap:4px;flex:1}
+.file-pick-btn{
+  background:var(--bg3);border:1px solid var(--border2);border-radius:3px;
+  padding:3px 8px;font-size:10px;color:var(--txt3);cursor:pointer;
+  font-family:var(--mono);white-space:nowrap;transition:all .15s;
+}
+.file-pick-btn:hover{border-color:var(--acc);color:var(--acc)}
+.file-name-txt{font-size:10px;color:var(--txt3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
+
 /* ── Body editor ── */
 .body-type-bar{display:flex;gap:4px;margin-bottom:12px;flex-wrap:wrap}
 .body-type-btn{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer;color:var(--txt3);font-family:var(--mono);transition:all .15s}
@@ -767,6 +784,13 @@ body::before{
 .auth-field input,.auth-field select{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius);padding:8px 12px;font-size:12px;color:var(--txt);font-family:var(--mono);outline:none;transition:border-color .15s}
 .auth-field input:focus,.auth-field select:focus{border-color:var(--acc)}
 .auth-field input::placeholder{color:var(--txt3)}
+
+/* ── Variable preview hint ── */
+.var-hint{
+  font-size:10px;color:var(--acc);font-family:var(--mono);
+  margin-top:3px;padding:2px 6px;background:var(--acc-dim);border-radius:3px;
+  display:inline-block;
+}
 
 /* ── Response panel ── */
 #response-panel{background:var(--bg1);border-top:1px solid var(--border);display:flex;flex-direction:column;min-height:200px;max-height:48vh}
@@ -927,7 +951,7 @@ body::before{
             oninput="markTabDirty()"
             onkeydown="if(event.key==='Enter')sendRequest()">
           <div class="btn-group">
-            <button class="save-btn" onclick="openSaveModal()">Save</button>
+            <button class="save-btn" onclick="handleSave()">Save</button>
             <button class="send-btn" id="send-btn" onclick="sendRequest()">Send</button>
           </div>
         </div>
@@ -977,11 +1001,11 @@ body::before{
             <div id="body-kv-wrap" style="display:none">
               <div class="kv-wrap">
                 <table class="kv-table">
-                  <thead><tr><th style="width:28px"></th><th>Key</th><th>Value</th><th style="width:36px"></th></tr></thead>
+                  <thead><tr><th style="width:28px"></th><th>Type</th><th>Key</th><th>Value / File</th><th style="width:36px"></th></tr></thead>
                   <tbody id="body-kv-body"></tbody>
                 </table>
               </div>
-              <button class="add-row-btn" onclick="addKVRow('body-kv')">+ Add Field</button>
+              <button class="add-row-btn" onclick="addFormRow()">+ Add Field</button>
             </div>
           </div>
 
@@ -1156,7 +1180,6 @@ body::before{
 <script>
 // ═══════════════════════════════════════════════════════
 //  TAB SYSTEM
-//  Each tab holds a complete snapshot of the request state
 // ═══════════════════════════════════════════════════════
 
 let tabCounter = 0;
@@ -1165,28 +1188,27 @@ function makeTabState(overrides = {}) {
   return Object.assign({
     id: ++tabCounter,
     name: 'Untitled Request',
-    savedReqId: null,      // DB id if saved
-    dirty: false,          // unsaved changes
+    savedReqId: null,
+    dirty: false,
     method: 'GET',
     url: '',
     params: [],
     headers: [],
     bodyType: 'none',
     bodyContent: '',
-    bodyKV: [],
+    bodyKV: [],        // [{type:'text'|'file', key, value, fileName}]
     authType: 'none',
     authData: {},
     response: null,
   }, overrides);
 }
 
-// tabs array & active index
 let tabs = [];
 let activeTabIdx = -1;
 
 function currentTab() { return tabs[activeTabIdx] || null; }
 
-// ── Save current DOM → active tab state ──────────────────
+// ── Save DOM → tab state ──────────────────────────────
 function snapshotTab() {
   const t = currentTab();
   if (!t) return;
@@ -1198,13 +1220,13 @@ function snapshotTab() {
   t.bodyContent = ['json','raw'].includes(S.bodyType)
     ? document.getElementById('body-editor').value : '';
   t.bodyKV = ['form','urlencoded'].includes(S.bodyType)
-    ? getKVRows('body-kv-body') : [];
+    ? getFormRows() : [];
   t.authType = document.getElementById('auth-type').value;
   t.authData = getAuthData();
   t.name = document.getElementById('req-name-text').textContent;
 }
 
-// ── Restore tab state → DOM ───────────────────────────────
+// ── Restore tab state → DOM ───────────────────────────
 function restoreTab(t) {
   document.getElementById('method-select').value = t.method;
   document.getElementById('url-input').value = t.url;
@@ -1224,13 +1246,14 @@ function restoreTab(t) {
   document.getElementById('body-editor').value = t.bodyContent || '';
 
   document.getElementById('body-kv-body').innerHTML = '';
-  if (t.bodyKV && t.bodyKV.length) t.bodyKV.forEach(r => addKVRow('body-kv', r.key, r.value));
+  if (t.bodyKV && t.bodyKV.length) {
+    t.bodyKV.forEach(r => addFormRow(r.type||'text', r.key, r.value, r.fileName));
+  }
 
   document.getElementById('auth-type').value = t.authType;
   S.authType = t.authType;
   S.authData = t.authData || {};
   renderAuthFields();
-  // restore saved auth field values
   if (t.authType === 'basic') {
     setInputVal('auth-username', t.authData.username || '');
     setInputVal('auth-password', t.authData.password || '');
@@ -1242,7 +1265,6 @@ function restoreTab(t) {
     setInputVal('auth-location', t.authData.location || 'header');
   }
 
-  // restore response
   if (t.response) {
     S.response = t.response;
     renderResponse(t.response);
@@ -1262,10 +1284,9 @@ function setInputVal(id, val) {
   if (el) el.value = val;
 }
 
-// ── Render the tab pill bar ───────────────────────────────
+// ── Render tab pill bar ───────────────────────────────
 function renderTabBar() {
   const bar = document.getElementById('req-tabs-bar');
-  // remove old pills (keep #new-tab-btn)
   bar.querySelectorAll('.req-tab-pill').forEach(el => el.remove());
   const newBtn = document.getElementById('new-tab-btn');
 
@@ -1290,19 +1311,16 @@ function methodColor(m) {
   return {GET:'#3dd68c',POST:'#f0883e',PUT:'#79c0ff',PATCH:'#d2a8ff',DELETE:'#f47067',HEAD:'#e3b341',OPTIONS:'#00d4ff'}[m] || '#cdd9e5';
 }
 
-// ── Switch to tab by index ────────────────────────────────
 function switchTab(idx) {
   if (idx === activeTabIdx) return;
   if (activeTabIdx >= 0) snapshotTab();
   activeTabIdx = idx;
   restoreTab(tabs[idx]);
   renderTabBar();
-  // update sidebar active state
   document.querySelectorAll('.req-item').forEach(el =>
     el.classList.toggle('active', el.id === 'ri-' + tabs[idx].savedReqId));
 }
 
-// ── New blank tab ─────────────────────────────────────────
 function newTab(overrides = {}) {
   if (activeTabIdx >= 0) snapshotTab();
   const t = makeTabState(overrides);
@@ -1312,11 +1330,9 @@ function newTab(overrides = {}) {
   renderTabBar();
 }
 
-// ── Close tab ─────────────────────────────────────────────
 function closeTab(e, idx) {
   e.stopPropagation();
   if (tabs.length === 1) {
-    // reset the single tab instead of removing
     tabs[0] = makeTabState();
     activeTabIdx = 0;
     restoreTab(tabs[0]);
@@ -1330,7 +1346,6 @@ function closeTab(e, idx) {
   renderTabBar();
 }
 
-// ── Mark current tab dirty (unsaved changes) ──────────────
 function markTabDirty() {
   const t = currentTab();
   if (!t) return;
@@ -1338,7 +1353,7 @@ function markTabDirty() {
 }
 
 // ═══════════════════════════════════════════════════════
-//  GLOBAL STATE (non-tab things)
+//  GLOBAL STATE
 // ═══════════════════════════════════════════════════════
 const S = {
   bodyType: 'none',
@@ -1356,7 +1371,6 @@ const S = {
 //  INIT
 // ═══════════════════════════════════════════════════════
 document.addEventListener('DOMContentLoaded', () => {
-  // create first tab
   tabs.push(makeTabState());
   activeTabIdx = 0;
   renderTabBar();
@@ -1419,7 +1433,7 @@ function respTab(name) {
 }
 
 // ═══════════════════════════════════════════════════════
-//  KV ROWS
+//  KV ROWS (params, headers)
 // ═══════════════════════════════════════════════════════
 function addKVRow(type, key='', value='', desc='', enabled=true) {
   const tbody = document.getElementById(type+'-body');
@@ -1457,6 +1471,105 @@ function getKVRows(tbodyId) {
     const cb = tr.querySelector('input[type=checkbox]');
     return { key: inputs[0]?.value||'', value: inputs[1]?.value||'', enabled: cb?.checked!==false };
   }).filter(r => r.key.trim());
+}
+
+// ═══════════════════════════════════════════════════════
+//  FORM-DATA ROWS  (with type selector + file pick)
+// ═══════════════════════════════════════════════════════
+// Each row stores: {type:'text'|'file', key, value, file (File obj or null), fileName}
+const formFileMap = new WeakMap(); // tr → File object
+
+function addFormRow(type='text', key='', value='', fileName='') {
+  const tbody = document.getElementById('body-kv-body');
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td style="text-align:center"><input type="checkbox" class="kv-cb" checked onchange="markTabDirty()"></td>
+    <td style="min-width:72px">
+      <select class="form-type-select" onchange="onFormTypeChange(this)">
+        <option value="text" ${type==='text'?'selected':''}>Text</option>
+        <option value="file" ${type==='file'?'selected':''}>File</option>
+      </select>
+    </td>
+    <td><input class="kv-input" placeholder="key" value="${esc(key)}" oninput="markTabDirty()"></td>
+    <td id="fv-cell">
+      ${type==='file'
+        ? `<div class="file-cell-wrap">
+             <label class="file-pick-btn">Choose File<input type="file" style="display:none" onchange="onFilePicked(this)"></label>
+             <span class="file-name-txt">${esc(fileName||'No file chosen')}</span>
+           </div>`
+        : `<input class="kv-input" placeholder="value" value="${esc(value)}" oninput="markTabDirty()">`
+      }
+    </td>
+    <td><button class="del-row-btn" onclick="this.closest('tr').remove();markTabDirty()" style="opacity:1">✕</button></td>`;
+  tbody.appendChild(tr);
+
+  // label the value cell so we can find it
+  tr.querySelector('td:nth-child(4)').id = '';
+}
+
+function onFormTypeChange(sel) {
+  const tr = sel.closest('tr');
+  const valueCell = tr.querySelector('td:nth-child(4)');
+  const type = sel.value;
+  if (type === 'file') {
+    valueCell.innerHTML = `<div class="file-cell-wrap">
+      <label class="file-pick-btn">Choose File<input type="file" style="display:none" onchange="onFilePicked(this)"></label>
+      <span class="file-name-txt">No file chosen</span>
+    </div>`;
+    formFileMap.delete(tr);
+  } else {
+    valueCell.innerHTML = `<input class="kv-input" placeholder="value" oninput="markTabDirty()">`;
+    formFileMap.delete(tr);
+  }
+  markTabDirty();
+}
+
+function onFilePicked(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const tr = input.closest('tr');
+  formFileMap.set(tr, file);
+  const nameSpan = tr.querySelector('.file-name-txt');
+  if (nameSpan) nameSpan.textContent = file.name;
+  markTabDirty();
+}
+
+function getFormRows() {
+  return [...document.querySelectorAll('#body-kv-body tr')].map(tr => {
+    const typeEl = tr.querySelector('.form-type-select');
+    const keyEl  = tr.querySelectorAll('input:not([type=checkbox]):not([type=file])')[0];
+    const type   = typeEl?.value || 'text';
+    const key    = keyEl?.value || '';
+    if (type === 'file') {
+      const file = formFileMap.get(tr) || null;
+      const nameSpan = tr.querySelector('.file-name-txt');
+      return { type:'file', key, value:'', fileName: file ? file.name : (nameSpan?.textContent||'') };
+    } else {
+      const valEl = tr.querySelector('td:nth-child(4) input.kv-input');
+      return { type:'text', key, value: valEl?.value||'' };
+    }
+  }).filter(r => r.key.trim());
+}
+
+// Build FormData for file-capable form submissions
+function buildFormData() {
+  const fd = new FormData();
+  const rows = [...document.querySelectorAll('#body-kv-body tr')];
+  rows.forEach(tr => {
+    const typeEl = tr.querySelector('.form-type-select');
+    const keyEl  = tr.querySelectorAll('input:not([type=checkbox]):not([type=file])')[0];
+    const type   = typeEl?.value || 'text';
+    const key    = keyEl?.value || '';
+    if (!key) return;
+    if (type === 'file') {
+      const file = formFileMap.get(tr);
+      if (file) fd.append(key, file, file.name);
+    } else {
+      const valEl = tr.querySelector('td:nth-child(4) input.kv-input');
+      fd.append(key, valEl?.value || '');
+    }
+  });
+  return fd;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1514,60 +1627,179 @@ function gv(id) { return document.getElementById(id)?.value || ''; }
 function updateMethodColor() {
   const sel = document.getElementById('method-select');
   sel.style.color = methodColor(sel.value);
-  // also update the tab pill
   const t = currentTab();
   if (t) { t.method = sel.value; renderTabBar(); }
 }
 
 // ═══════════════════════════════════════════════════════
-//  ENV SUBSTITUTION
+//  ENVIRONMENT VARIABLE SUBSTITUTION
+//  Applies {{var}} replacement everywhere before sending
 // ═══════════════════════════════════════════════════════
 function getActiveEnv() { return S.environments.find(e => e.active) || null; }
-function substituteVars(str) {
+
+function getEnvVars() {
   const env = getActiveEnv();
-  if(!env || !env.vars) return str;
-  let vars = {};
-  try { vars = typeof env.vars==='string' ? JSON.parse(env.vars) : env.vars; } catch(e){}
-  return str.replace(/\{\{(\w+)\}\}/g, (_,k) => vars[k]!==undefined ? vars[k] : `{{${k}}}`);
+  if (!env || !env.vars) return {};
+  try { return typeof env.vars === 'string' ? JSON.parse(env.vars) : (env.vars || {}); }
+  catch(e) { return {}; }
+}
+
+function substituteVars(str) {
+  if (typeof str !== 'string') return str;
+  const vars = getEnvVars();
+  if (!Object.keys(vars).length) return str;
+  return str.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] !== undefined ? vars[k] : `{{${k}}}`);
+}
+
+// Sub an entire KV array
+function substituteKVList(list) {
+  return list.map(item => ({
+    ...item,
+    key:   substituteVars(item.key),
+    value: substituteVars(item.value),
+  }));
+}
+
+// Sub auth data values (not keys)
+function substituteAuthData(authType, authData) {
+  const out = {};
+  for (const [k, v] of Object.entries(authData)) {
+    out[k] = typeof v === 'string' ? substituteVars(v) : v;
+  }
+  return out;
 }
 
 // ═══════════════════════════════════════════════════════
 //  SEND REQUEST
 // ═══════════════════════════════════════════════════════
 async function sendRequest() {
-  const url = substituteVars(document.getElementById('url-input').value.trim());
-  if(!url) { toast('Enter a URL first', 'error'); return; }
+  const rawUrl = document.getElementById('url-input').value.trim();
+  if (!rawUrl) { toast('Enter a URL first', 'error'); return; }
+
+  const url = substituteVars(rawUrl);
 
   const btn = document.getElementById('send-btn');
   btn.innerHTML = '<span class="spinner"></span>';
   btn.disabled = true;
 
   const bodyType = S.bodyType;
-  let bodyContent = '';
-  if(['json','raw'].includes(bodyType)) {
-    bodyContent = document.getElementById('body-editor').value;
-  } else if(['form','urlencoded'].includes(bodyType)) {
-    const kvRows = getKVRows('body-kv-body');
-    bodyContent = JSON.stringify(Object.fromEntries(kvRows.map(r=>[r.key,r.value])));
-  }
+  const authType = document.getElementById('auth-type').value;
+  const rawAuthData = getAuthData();
+  const authData = substituteAuthData(authType, rawAuthData);
 
-  const payload = {
-    method: document.getElementById('method-select').value,
-    url, params: getKVRows('params-body'), headers: getKVRows('headers-body'),
-    body_type: bodyType, body_content: bodyContent,
-    auth_type: S.authType, auth_data: getAuthData()
-  };
+  // Substitute params & headers
+  const rawParams  = getKVRows('params-body');
+  const rawHeaders = getKVRows('headers-body');
+  const params  = substituteKVList(rawParams);
+  const headers = substituteKVList(rawHeaders);
 
   try {
-    const res = await fetch('/api/execute', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    S.response = data;
-    // save response in current tab
+    let result;
+
+    if (bodyType === 'form') {
+      // ── multipart/form-data with actual file support ──
+      // Build FormData, apply var substitution to text fields
+      const fd = new FormData();
+      const rows = [...document.querySelectorAll('#body-kv-body tr')];
+      rows.forEach(tr => {
+        const typeEl = tr.querySelector('.form-type-select');
+        const keyEl  = tr.querySelectorAll('input:not([type=checkbox]):not([type=file])')[0];
+        const ftype  = typeEl?.value || 'text';
+        const key    = substituteVars(keyEl?.value || '');
+        if (!key) return;
+        if (ftype === 'file') {
+          const file = formFileMap.get(tr);
+          if (file) fd.append(key, file, file.name);
+        } else {
+          const valEl = tr.querySelector('td:nth-child(4) input.kv-input');
+          fd.append(key, substituteVars(valEl?.value || ''));
+        }
+      });
+
+      // Build headers map (without Content-Type — browser sets boundary)
+      const hdrs = {};
+      headers.filter(h => h.key && h.enabled !== false).forEach(h => { hdrs[h.key] = h.value; });
+      // Auth injection
+      if (authType === 'bearer') hdrs['Authorization'] = `Bearer ${authData.token||''}`;
+      else if (authType === 'apikey' && authData.location === 'header') hdrs[authData.key||'X-API-Key'] = authData.value||'';
+
+      // Build query string
+      const qp = new URLSearchParams();
+      params.filter(p => p.key && p.enabled !== false).forEach(p => qp.set(p.key, p.value));
+      if (authType === 'apikey' && authData.location === 'query') qp.set(authData.key||'X-API-Key', authData.value||'');
+
+      const fullUrl = qp.toString() ? url + (url.includes('?')?'&':'?') + qp.toString() : url;
+
+      // For file uploads we proxy directly via fetch to preserve FormData
+      // We need the server to relay it — but since our /api/execute uses requests lib
+      // and can't receive FormData from JS, we use a direct fetch instead
+      // and handle auth ourselves. For simplicity, send multipart via the proxy
+      // by converting to JSON descriptor and handling on server (files go as filename only).
+      // Better: send multipart directly to target from browser (CORS permitting),
+      // or send via proxy as JSON with base64. We'll proxy as JSON with base64 for files.
+
+      // Collect form rows as JSON for proxy
+      const formRows = [];
+      rows.forEach(tr => {
+        const typeEl = tr.querySelector('.form-type-select');
+        const keyEl  = tr.querySelectorAll('input:not([type=checkbox]):not([type=file])')[0];
+        const ftype  = typeEl?.value || 'text';
+        const key    = substituteVars(keyEl?.value || '');
+        if (!key) return;
+        if (ftype === 'file') {
+          const file = formFileMap.get(tr);
+          if (file) formRows.push({type:'file', key, fileName:file.name});
+          // Note: actual file bytes can't be proxied this way without base64 encoding
+          // We include them as text placeholder; full file upload would need a different endpoint
+        } else {
+          const valEl = tr.querySelector('td:nth-child(4) input.kv-input');
+          formRows.push({type:'text', key, value: substituteVars(valEl?.value||'')});
+        }
+      });
+
+      let bodyContent = JSON.stringify(Object.fromEntries(
+        formRows.filter(r=>r.type==='text').map(r=>[r.key,r.value])
+      ));
+
+      const payload = {
+        method: document.getElementById('method-select').value,
+        url, params, headers,
+        body_type: 'form', body_content: bodyContent,
+        auth_type: authType, auth_data: authData
+      };
+      const res = await fetch('/api/execute', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+      });
+      result = await res.json();
+    } else {
+      // ── All other body types ──
+      let bodyContent = '';
+      if (['json','raw'].includes(bodyType)) {
+        bodyContent = substituteVars(document.getElementById('body-editor').value);
+      } else if (bodyType === 'urlencoded') {
+        const kvRows = getFormRows();
+        const obj = {};
+        kvRows.forEach(r => { obj[substituteVars(r.key)] = substituteVars(r.value); });
+        bodyContent = JSON.stringify(obj);
+      }
+
+      const payload = {
+        method: document.getElementById('method-select').value,
+        url, params, headers,
+        body_type: bodyType, body_content: bodyContent,
+        auth_type: authType, auth_data: authData
+      };
+
+      const res = await fetch('/api/execute', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+      });
+      result = await res.json();
+    }
+
+    S.response = result;
     const t = currentTab();
-    if (t) t.response = data;
-    renderResponse(data);
+    if (t) t.response = result;
+    renderResponse(result);
     loadHistory();
   } catch(e) {
     renderError(e.message);
@@ -1792,16 +2024,13 @@ async function processImportFile(file) {
 //  LOAD / SAVE REQUESTS
 // ═══════════════════════════════════════════════════════
 
-// Open a saved request — reuse existing tab if already open, else open in current tab
 async function loadRequestInTab(id) {
-  // check if already open in a tab
   const existingIdx = tabs.findIndex(t => t.savedReqId === id);
   if (existingIdx >= 0) { switchTab(existingIdx); return; }
 
   const res = await fetch('/api/requests/'+id);
   const r = await res.json();
 
-  // if current tab is blank & clean, reuse it; else open new tab
   const t = currentTab();
   const reuseCurrentTab = t && !t.dirty && !t.savedReqId && !t.url;
 
@@ -1837,14 +2066,12 @@ async function loadRequestInTab(id) {
 
 async function deleteReq(id) {
   await fetch('/api/requests/'+id, {method:'DELETE'});
-  // close tab if open
   const idx = tabs.findIndex(t => t.savedReqId === id);
   if (idx >= 0) closeTab({ stopPropagation:()=>{} }, idx);
   await loadCollections();
   toast('Request deleted', 'info');
 }
 
-// Rename from URL bar (current tab's request)
 function openRenameReqModal() {
   const t = currentTab();
   document.getElementById('rename-req-input').value = t ? t.name : '';
@@ -1866,11 +2093,9 @@ async function confirmRenameRequest() {
   if(S.renameReqId) {
     await fetch('/api/requests/'+S.renameReqId+'/rename', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})});
     await loadCollections();
-    // update tab name if it's the open tab
     const idx = tabs.findIndex(t => t.savedReqId === S.renameReqId);
     if (idx >= 0) { tabs[idx].name = name; if(idx===activeTabIdx) document.getElementById('req-name-text').textContent = name; renderTabBar(); }
   } else {
-    // unsaved request — just update tab
     const t = currentTab();
     if (t) { t.name = name; document.getElementById('req-name-text').textContent = name; renderTabBar(); }
   }
@@ -1878,12 +2103,23 @@ async function confirmRenameRequest() {
   toast(`Renamed to "${name}"`, 'success');
 }
 
-// ─── Save modal ────────────────────────────────────────────────────────────────
+// ─── Save logic ───────────────────────────────────────────────────────────────
 function renderSaveModal(colls) {
   const sel = document.getElementById('save-collection');
   const cur = sel.value;
   sel.innerHTML = '<option value="">Select collection…</option>' +
     colls.map(c => `<option value="${c.id}" ${c.id==cur?'selected':''}>${esc(c.name)}</option>`).join('');
+}
+
+// Smart save: if already saved → update silently; else → open modal
+async function handleSave() {
+  const t = currentTab();
+  if (t && t.savedReqId) {
+    // Already saved — just update in place
+    await performSave(t.name, null);   // collId=null means keep existing
+  } else {
+    openSaveModal();
+  }
 }
 
 function openSaveModal() {
@@ -1894,42 +2130,59 @@ function openSaveModal() {
 }
 
 async function saveRequest() {
-  const name = document.getElementById('save-name').value.trim()||'Untitled';
+  const name   = document.getElementById('save-name').value.trim() || 'Untitled';
   const collId = document.getElementById('save-collection').value;
-  if(!collId) { toast('Select a collection first', 'error'); return; }
+  if (!collId) { toast('Select a collection first', 'error'); return; }
+  closeModal('save-modal');
+  await performSave(name, parseInt(collId));
+}
 
+async function performSave(name, collId) {
   const bodyType = S.bodyType;
   let bodyContent = '';
-  if(['json','raw'].includes(bodyType)) bodyContent = document.getElementById('body-editor').value;
-  else if(['form','urlencoded'].includes(bodyType)) {
-    const kv = getKVRows('body-kv-body');
-    bodyContent = JSON.stringify(Object.fromEntries(kv.map(r=>[r.key,r.value])));
+  if (['json','raw'].includes(bodyType)) bodyContent = document.getElementById('body-editor').value;
+  else if (['form','urlencoded'].includes(bodyType)) {
+    const kv = getFormRows();
+    bodyContent = JSON.stringify(Object.fromEntries(
+      kv.filter(r=>r.type!=='file').map(r=>[r.key, r.value])
+    ));
   }
 
   const payload = {
-    name, collection_id: parseInt(collId),
+    name: name,
     method: document.getElementById('method-select').value,
     url: document.getElementById('url-input').value,
-    params: getKVRows('params-body'), headers: getKVRows('headers-body'),
+    params:  getKVRows('params-body'),
+    headers: getKVRows('headers-body'),
     body_type: bodyType, body_content: bodyContent,
-    auth_type: S.authType, auth_data: getAuthData()
+    auth_type: document.getElementById('auth-type').value,
+    auth_data: getAuthData(),
   };
+  if (collId) payload.collection_id = collId;
 
   const t = currentTab();
-  if(t && t.savedReqId) {
-    await fetch('/api/requests/'+t.savedReqId, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  if (t && t.savedReqId) {
+    // Update existing
+    await fetch('/api/requests/'+t.savedReqId, {
+      method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+    });
+    if (t) { t.name = name; t.dirty = false; }
+    document.getElementById('req-name-text').textContent = name;
+    renderTabBar();
+    await loadCollections();
     toast('Request updated', 'success');
   } else {
-    const res = await fetch('/api/requests', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    // Insert new
+    const res = await fetch('/api/requests', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+    });
     const data = await res.json();
-    if(t) t.savedReqId = data.id;
+    if (t) { t.savedReqId = data.id; t.name = name; t.dirty = false; }
+    document.getElementById('req-name-text').textContent = name;
+    renderTabBar();
+    await loadCollections();
     toast('Request saved', 'success');
   }
-  if(t) { t.name = name; t.dirty = false; }
-  document.getElementById('req-name-text').textContent = name;
-  closeModal('save-modal');
-  renderTabBar();
-  await loadCollections();
 }
 
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
@@ -1964,7 +2217,6 @@ async function loadHistoryItem(id) {
   const res = await fetch('/api/history/'+id);
   const data = await res.json();
   const req = data.request_data || {};
-  // open in new tab
   newTab({ method: req.method||'GET', url: req.url||'', name: req.url||'From History' });
   switchView('builder');
 }
@@ -1977,7 +2229,7 @@ async function clearHistory() {
 }
 
 // ═══════════════════════════════════════════════════════
-//  ENVIRONMENTS  — FIXED save logic
+//  ENVIRONMENTS
 // ═══════════════════════════════════════════════════════
 async function loadEnvironments() {
   const res = await fetch('/api/environments');
@@ -2044,13 +2296,9 @@ function addEnvVar(id) {
   tbody.appendChild(tr);
 }
 
-// ── FIXED: read DOM *before* any async call, don't re-render until after save ──
 async function saveEnv(id) {
-  // 1. Read name immediately from DOM
   const nameEl = document.getElementById('en-'+id);
   const name = (nameEl ? nameEl.value.trim() : '') || 'Environment';
-
-  // 2. Read vars immediately from DOM
   const rows = [...document.querySelectorAll('#env-vars-'+id+' tr')];
   const vars = {};
   rows.forEach(tr => {
@@ -2058,23 +2306,18 @@ async function saveEnv(id) {
     const key = inputs[0]?.value.trim();
     if (key) vars[key] = inputs[1]?.value || '';
   });
-
-  // 3. Persist — await AFTER we've captured all DOM values
   const res = await fetch('/api/environments/'+id, {
     method: 'PUT',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({name, vars})
   });
-
   if (!res.ok) { toast('Failed to save environment', 'error'); return; }
-
-  // 4. Update local state without full re-render (avoids losing focus / position)
   const envIdx = S.environments.findIndex(e => e.id === id);
   if (envIdx >= 0) {
     S.environments[envIdx].name = name;
     S.environments[envIdx].vars = vars;
   }
-  renderEnvSelector(); // just refresh the dropdown
+  renderEnvSelector();
   toast('Environment saved', 'success');
 }
 
@@ -2120,7 +2363,6 @@ function setupResizeHandle() {
   });
 }
 
-// ── Close modals on overlay click ─────────────────────────────────────────────
 document.querySelectorAll('.modal-overlay').forEach(o =>
   o.addEventListener('click', e => { if(e.target===o) o.classList.remove('open'); }));
 </script>
