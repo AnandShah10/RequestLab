@@ -8,14 +8,42 @@ import json
 import os
 import time
 import sqlite3
+import hashlib
 import traceback
-from datetime import datetime
+import smtplib
+import secrets
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
+from datetime import datetime, timedelta
 
 import requests
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, session, redirect
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='media', static_url_path='/media')
+app.secret_key = os.environ.get('SECRET_KEY', 'requestlab-secret-' + hashlib.md5(os.path.abspath(__file__).encode()).hexdigest())
 DB_PATH = "RequestLab.db"
+
+# Load .env file if it exists
+if os.path.exists(".env"):
+    with open(".env") as f:
+        for line in f:
+            line = line.strip()
+            if line and "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                val = v.strip()
+                if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                    val = val[1:-1]
+                os.environ[k.strip()] = val
+
+SMTP_CONFIG = {
+    "server": os.environ.get("SMTP_SERVER", "smtp.gmail.com").strip('"').strip("'"),
+    "port": int(str(os.environ.get("SMTP_PORT", "587")).strip('"').strip("'")),
+    "user": os.environ.get("SMTP_USER", "").strip('"').strip("'"),
+    "pass": os.environ.get("SMTP_PASS", "").strip('"').strip("'"),
+    "use_tls": str(os.environ.get("SMTP_TLS", "True")).lower().strip('"').strip("'") == "true",
+    "sender": os.environ.get("SMTP_SENDER", "noreply@requestlab.com").strip('"').strip("'")
+}
 
 # ─── Database Setup ───────────────────────────────────────────────────────────
 
@@ -27,8 +55,17 @@ def get_db():
 def init_db():
     with get_db() as conn:
         conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                email    TEXT NOT NULL UNIQUE,
+                password TEXT NOT NULL,
+                avatar_color TEXT DEFAULT '#00d4ff',
+                created  TEXT DEFAULT (datetime('now'))
+            );
             CREATE TABLE IF NOT EXISTS collections (
                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
                 name    TEXT NOT NULL,
                 created TEXT DEFAULT (datetime('now'))
             );
@@ -55,6 +92,7 @@ def init_db():
             );
             CREATE TABLE IF NOT EXISTS history (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       INTEGER REFERENCES users(id) ON DELETE CASCADE,
                 method        TEXT,
                 url           TEXT,
                 status_code   INTEGER,
@@ -65,9 +103,15 @@ def init_db():
             );
             CREATE TABLE IF NOT EXISTS environments (
                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
                 name    TEXT NOT NULL,
                 vars    TEXT DEFAULT '{}',
                 active  INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS password_resets (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                expires_at TEXT NOT NULL
             );
         """)
         # Migration: add folder_id to requests if missing
@@ -76,8 +120,253 @@ def init_db():
             conn.commit()
         except Exception:
             pass
+            
+        # Migration: add parent_folder_id to folders if missing
+        try:
+            conn.execute("ALTER TABLE folders ADD COLUMN parent_folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE")
+            conn.commit()
+        except Exception:
+            pass
+
+        # Migration: add user_id to collections if missing
+        try:
+            conn.execute("ALTER TABLE collections ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+            conn.commit()
+        except Exception:
+            pass
+
+        # Migration: add user_id to history if missing
+        try:
+            conn.execute("ALTER TABLE history ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+            conn.commit()
+        except Exception:
+            pass
+
+        # Migration: add user_id to environments if missing
+        try:
+            conn.execute("ALTER TABLE environments ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+            conn.commit()
+        except Exception:
+            pass
+
+        # Migration: add avatar_color to users if missing
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN avatar_color TEXT DEFAULT '#00d4ff'")
+            conn.commit()
+        except Exception:
+            pass
 
 init_db()
+
+
+# ─── Auth helpers ─────────────────────────────────────────────────────────────
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def get_current_user_id():
+    return session.get('user_id')
+
+def require_auth():
+    uid = get_current_user_id()
+    if not uid:
+        return None
+    return uid
+
+
+# ─── Auth Routes ──────────────────────────────────────────────────────────────
+
+@app.route("/api/auth/register", methods=["POST"])
+def auth_register():
+    d = request.json or {}
+    username = d.get("username", "").strip()
+    email = d.get("email", "").strip().lower()
+    password = d.get("password", "")
+    if not username or not email or not password:
+        return jsonify({"error": "All fields are required"}), 400
+    if len(password) < 4:
+        return jsonify({"error": "Password must be at least 4 characters"}), 400
+    pw_hash = hash_password(password)
+    colors = ['#00d4ff','#3dd68c','#f0883e','#d2a8ff','#f47067','#e3b341','#79c0ff']
+    import random
+    avatar_color = random.choice(colors)
+    try:
+        with get_db() as conn:
+            uid = conn.execute(
+                "INSERT INTO users (username, email, password, avatar_color) VALUES (?,?,?,?)",
+                (username, email, pw_hash, avatar_color)
+            ).lastrowid
+        session['user_id'] = uid
+        session['username'] = username
+        return jsonify({"ok": True, "user": {"id": uid, "username": username, "email": email, "avatar_color": avatar_color}})
+    except sqlite3.IntegrityError as e:
+        if 'username' in str(e):
+            return jsonify({"error": "Username already exists"}), 409
+        return jsonify({"error": "Email already registered"}), 409
+
+@app.route("/api/auth/login", methods=["POST"])
+def auth_login():
+    d = request.json or {}
+    login = d.get("login", "").strip()  # can be username or email
+    password = d.get("password", "")
+    if not login or not password:
+        return jsonify({"error": "Username/email and password required"}), 400
+    pw_hash = hash_password(password)
+    with get_db() as conn:
+        user = conn.execute(
+            "SELECT * FROM users WHERE (username=? OR email=?) AND password=?",
+            (login, login.lower(), pw_hash)
+        ).fetchone()
+    if not user:
+        return jsonify({"error": "Invalid credentials"}), 401
+    session['user_id'] = user['id']
+    session['username'] = user['username']
+    return jsonify({"ok": True, "user": {"id": user['id'], "username": user['username'], "email": user['email'], "avatar_color": user['avatar_color']}})
+
+@app.route("/api/auth/forgot-password", methods=["POST"])
+def auth_forgot_password():
+    data = request.json or {}
+    email = data.get("email", "").strip()
+    if not email:
+        return jsonify({"error": "Email is required"}), 400
+
+    with get_db() as conn:
+        user = conn.execute("SELECT id, username FROM users WHERE email=?", (email,)).fetchone()
+        if not user:
+            # Prevent email enumeration by returning success anyway
+            return jsonify({"ok": True, "message": "Check your inbox! If an account exists, a reset link has been sent."})
+
+        token = secrets.token_urlsafe(32)
+        expires = (datetime.utcnow() + timedelta(hours=1)).isoformat()
+        conn.execute("INSERT INTO password_resets (token, user_id, expires_at) VALUES (?, ?, ?)", (token, user['id'], expires))
+        
+    reset_link = f"http://localhost:5000/app?reset_token={token}"
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <style>
+        body {{ margin: 0; padding: 0; background-color: #0d1117; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }}
+        .wrapper {{ width: 100%; table-layout: fixed; background-color: #0d1117; padding: 40px 0; }}
+        .main {{ background-color: #161b22; margin: 0 auto; width: 100%; max-width: 600px; border-spacing: 0; border-radius: 12px; border: 1px solid #30363d; color: #cdd9e5; overflow: hidden; }}
+        .header {{ background: linear-gradient(135deg, #00d4ff 0%, #d2a8ff 100%); padding: 40px; text-align: center; }}
+        .content {{ padding: 40px; text-align: left; }}
+        h1 {{ color: #ffffff; font-size: 26px; font-weight: 700; margin: 0; letter-spacing: -0.5px; }}
+        p {{ font-size: 16px; line-height: 24px; margin: 20px 0; color: #8b9eb5; }}
+        .btn-container {{ text-align: center; margin: 35px 0; }}
+        .btn {{ background-color: #00d4ff; color: #000000 !important; text-decoration: none; padding: 16px 36px; border-radius: 30px; font-weight: 700; font-size: 16px; display: inline-block; box-shadow: 0 4px 20px rgba(0, 212, 255, 0.4); }}
+        .footer {{ padding: 25px 40px; text-align: center; border-top: 1px solid #30363d; background-color: #0d1117; }}
+        .footer p {{ font-size: 13px; color: #4d6377; margin: 0; }}
+        .logo-img {{ width: 64px; height: 64px; margin-bottom: 15px; filter: drop-shadow(0 0 10px rgba(255,255,255,0.2)); }}
+      </style>
+    </head>
+    <body>
+      <div class="wrapper">
+        <table class="main" align="center">
+          <tr>
+            <td class="header">
+              <img src="cid:logo" class="logo-img" alt="RequestLab">
+              <h1>Reset Your Password</h1>
+            </td>
+          </tr>
+          <tr>
+            <td class="content">
+              <p>Hello <strong>{user['username']}</strong>,</p>
+              <p>We received a request to reset your password for RequestLab. If you didn't request this, you can safely ignore this email. No changes have been made to your account yet.</p>
+              <div class="btn-container">
+                <a href="{reset_link}" class="btn">Set New Password</a>
+              </div>
+              <p>This link will remain active for <strong>1 hour</strong>. For security reasons, the link can only be used once.</p>
+              <p>Happy coding!<br>The RequestLab Team</p>
+            </td>
+          </tr>
+          <tr>
+            <td class="footer">
+              <p>&copy; 2026 RequestLab &bull; Modern API Client</p>
+            </td>
+          </tr>
+        </table>
+      </div>
+    </body>
+    </html>
+    """
+
+    msg = MIMEMultipart("alternative")
+    msg['Subject'] = 'RequestLab Password Reset'
+    msg['From'] = SMTP_CONFIG['sender']
+    msg['To'] = email
+
+    part1 = MIMEText(f"Hello {user['username']},\n\nClick the link below to reset your password:\n{reset_link}\n\nIf you didn't request this, ignore this email.\nThis link expires in 1 hour.", "plain")
+    part2 = MIMEText(html_content, "html")
+
+    msg.attach(part1)
+    msg.attach(part2)
+
+    # Inline logo
+    logo_path = os.path.join(app.static_folder, 'logo.png')
+    if os.path.exists(logo_path):
+        with open(logo_path, 'rb') as f:
+            img = MIMEImage(f.read())
+            img.add_header('Content-ID', '<logo>')
+            msg.attach(img)
+
+    try:
+        with smtplib.SMTP(SMTP_CONFIG['server'], SMTP_CONFIG['port']) as server:
+            if SMTP_CONFIG['use_tls']:
+                server.starttls()
+            if SMTP_CONFIG['user'] and SMTP_CONFIG['pass']:
+                server.login(SMTP_CONFIG['user'], SMTP_CONFIG['pass'])
+            server.send_message(msg)
+    except Exception as e:
+        print("SMTP Error:", e)
+        return jsonify({"error": f"Failed to send email. Check SMTP configuration in postman.py. Details: {e}"}), 500
+
+    return jsonify({"ok": True, "message": "If an account exists, a reset link has been sent."})
+
+@app.route("/api/auth/reset-password", methods=["POST"])
+def auth_reset_password():
+    data = request.json or {}
+    token = data.get("token", "").strip()
+    new_pw   = data.get("new_password", "").strip()
+
+    if not token or not new_pw:
+        return jsonify({"error": "Token and new password required"}), 400
+
+    with get_db() as conn:
+        reset = conn.execute("SELECT user_id, expires_at FROM password_resets WHERE token=?", (token,)).fetchone()
+        if not reset:
+            return jsonify({"error": "Invalid or expired token"}), 400
+        
+        # Check expiry
+        if datetime.fromisoformat(reset['expires_at']) < datetime.utcnow():
+            conn.execute("DELETE FROM password_resets WHERE token=?", (token,))
+            return jsonify({"error": "Token has expired"}), 400
+
+        hashed_pw = hashlib.sha256(new_pw.encode()).hexdigest()
+        conn.execute("UPDATE users SET password=? WHERE id=?", (hashed_pw, reset['user_id']))
+        conn.execute("DELETE FROM password_resets WHERE token=?", (token,))
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/auth/me", methods=["GET"])
+def auth_me():
+    uid = get_current_user_id()
+    if not uid:
+        return jsonify({"authenticated": False}), 200
+    with get_db() as conn:
+        user = conn.execute("SELECT id,username,email,avatar_color FROM users WHERE id=?", (uid,)).fetchone()
+    if not user:
+        session.clear()
+        return jsonify({"authenticated": False}), 200
+    return jsonify({"authenticated": True, "user": dict(user)})
+
+@app.route("/api/auth/logout", methods=["POST"])
+def auth_logout():
+    session.clear()
+    return jsonify({"ok": True})
 
 # ─── Proxy / Execute Request ──────────────────────────────────────────────────
 
@@ -152,8 +441,8 @@ def execute_request():
         }
         with get_db() as conn:
             conn.execute(
-                "INSERT INTO history (method,url,status_code,duration_ms,request_data,response_data) VALUES (?,?,?,?,?,?)",
-                (method, url, resp.status_code, round(duration_ms,2),
+                "INSERT INTO history (user_id,method,url,status_code,duration_ms,request_data,response_data) VALUES (?,?,?,?,?,?,?)",
+                (get_current_user_id(), method, url, resp.status_code, round(duration_ms,2),
                  json.dumps(data), json.dumps({"status_code": resp.status_code, "body_preview": resp_body[:500]}))
             )
         return jsonify(result)
@@ -171,8 +460,12 @@ def execute_request():
 
 @app.route("/api/collections", methods=["GET"])
 def list_collections():
+    uid = get_current_user_id()
     with get_db() as conn:
-        cols        = conn.execute("SELECT * FROM collections ORDER BY created DESC").fetchall()
+        if uid:
+            cols = conn.execute("SELECT * FROM collections WHERE user_id=? ORDER BY created DESC", (uid,)).fetchall()
+        else:
+            cols = conn.execute("SELECT * FROM collections WHERE user_id IS NULL ORDER BY created DESC").fetchall()
         all_folders = conn.execute("SELECT * FROM folders ORDER BY name").fetchall()
         all_reqs    = conn.execute(
             "SELECT id,collection_id,folder_id,name,method FROM requests ORDER BY id"
@@ -210,21 +503,30 @@ def list_collections():
 @app.route("/api/collections", methods=["POST"])
 def create_collection():
     name = (request.json or {}).get("name", "New Collection")
+    uid = get_current_user_id()
     with get_db() as conn:
-        cur = conn.execute("INSERT INTO collections (name) VALUES (?)", (name,))
+        cur = conn.execute("INSERT INTO collections (name, user_id) VALUES (?,?)", (name, uid))
         cid = cur.lastrowid
     return jsonify({"id": cid, "name": name, "requests": [], "folders": []})
 
 @app.route("/api/collections/<int:cid>", methods=["PUT"])
 def rename_collection(cid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
     name = (request.json or {}).get("name", "")
     with get_db() as conn:
+        col = conn.execute("SELECT user_id FROM collections WHERE id=?", (cid,)).fetchone()
+        if not col or col["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
         conn.execute("UPDATE collections SET name=? WHERE id=?", (name, cid))
     return jsonify({"ok": True})
 
 @app.route("/api/collections/<int:cid>", methods=["DELETE"])
 def delete_collection(cid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
     with get_db() as conn:
+        col = conn.execute("SELECT user_id FROM collections WHERE id=?", (cid,)).fetchone()
+        if not col or col["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
         conn.execute("DELETE FROM collections WHERE id=?", (cid,))
     return jsonify({"ok": True})
 
@@ -290,13 +592,14 @@ def export_collection(cid):
 @app.route("/api/collections/import", methods=["POST"])
 def import_collection():
     try:
+        uid = get_current_user_id()
         data = request.json or {}
 
         if data.get("RequestLab_export"):
             col_data = data.get("collection", {})
             name = col_data.get("name", "Imported Collection")
             with get_db() as conn:
-                cid = conn.execute("INSERT INTO collections (name) VALUES (?)", (name,)).lastrowid
+                cid = conn.execute("INSERT INTO collections (name, user_id) VALUES (?, ?)", (name, uid)).lastrowid
 
                 # Recreate folders, mapping old ids → new ids
                 folder_id_map = {}
@@ -336,55 +639,59 @@ def import_collection():
         if "schema.getpostman.com" in postman_schema or "item" in data:
             name = data.get("info",{}).get("name","Imported Collection")
 
-            def extract_items(items):
-                result = []
-                for item in (items or []):
-                    if "item" in item: result.extend(extract_items(item["item"]))
-                    elif "request" in item: result.append(item)
-                return result
-
-            flat_items = extract_items(data.get("item",[]))
-
             with get_db() as conn:
-                cid = conn.execute("INSERT INTO collections (name) VALUES (?)", (name,)).lastrowid
-                for item in flat_items:
-                    req       = item.get("request",{})
-                    item_name = item.get("name","Untitled")
-                    method    = req.get("method","GET").upper()
-                    url_raw   = req.get("url","")
-                    url       = url_raw.get("raw","") if isinstance(url_raw, dict) else url_raw
-                    params    = []
-                    if isinstance(url_raw, dict):
-                        for q in url_raw.get("query",[]):
-                            if not q.get("disabled",False):
-                                params.append({"key":q.get("key",""),"value":q.get("value",""),"enabled":True})
-                    headers = [{"key":h.get("key",""),"value":h.get("value",""),"enabled":True}
-                               for h in req.get("header",[]) if not h.get("disabled",False)]
-                    body_type="none"; body_content=""
-                    body_obj = req.get("body") or {}
-                    mode = body_obj.get("mode","none")
-                    if mode=="raw":
-                        body_type = "json" if "json" in body_obj.get("options",{}).get("raw",{}).get("language","") else "raw"
-                        body_content = body_obj.get("raw","")
-                    elif mode=="urlencoded":
-                        body_type="urlencoded"
-                        body_content=json.dumps({x["key"]:x.get("value","") for x in body_obj.get("urlencoded",[]) if not x.get("disabled")})
-                    elif mode=="formdata":
-                        body_type="form"
-                        body_content=json.dumps({x["key"]:x.get("value","") for x in body_obj.get("formdata",[]) if not x.get("disabled")})
-                    auth_type="none"; auth_data={}
-                    auth_obj  = req.get("auth") or {}
-                    a_type    = auth_obj.get("type","noauth")
-                    if a_type=="basic":
-                        auth_type="basic"; auth_data={x["key"]:x.get("value","") for x in auth_obj.get("basic",[])}
-                    elif a_type=="bearer":
-                        auth_type="bearer"; auth_data={"token":next((x.get("value","") for x in auth_obj.get("bearer",[]) if x["key"]=="token"),"")}
-                    elif a_type=="apikey":
-                        auth_type="apikey"; auth_data={x["key"]:x.get("value","") for x in auth_obj.get("apikey",[])}
-                    conn.execute(
-                        "INSERT INTO requests (collection_id,name,method,url,params,headers,body_type,body_content,auth_type,auth_data) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        (cid,item_name,method,url,json.dumps(params),json.dumps(headers),body_type,body_content,auth_type,json.dumps(auth_data))
-                    )
+                cid = conn.execute("INSERT INTO collections (name, user_id) VALUES (?, ?)", (name, uid)).lastrowid
+                
+                def process_items(items, parent_folder_id=None):
+                    for item in (items or []):
+                        item_name = item.get("name","Untitled")
+                        if "item" in item:
+                            # It is a folder
+                            fid = conn.execute(
+                                "INSERT INTO folders (collection_id,parent_folder_id,name) VALUES (?,?,?)",
+                                (cid, parent_folder_id, item_name)
+                            ).lastrowid
+                            process_items(item["item"], fid)
+                        elif "request" in item:
+                            # It is a request
+                            req       = item.get("request",{})
+                            method    = req.get("method","GET").upper()
+                            url_raw   = req.get("url","")
+                            url       = url_raw.get("raw","") if isinstance(url_raw, dict) else url_raw
+                            params    = []
+                            if isinstance(url_raw, dict):
+                                for q in url_raw.get("query",[]):
+                                    if not q.get("disabled",False):
+                                        params.append({"key":q.get("key",""),"value":q.get("value",""),"enabled":True})
+                            headers = [{"key":h.get("key",""),"value":h.get("value",""),"enabled":True}
+                                       for h in req.get("header",[]) if not h.get("disabled",False)]
+                            body_type="none"; body_content=""
+                            body_obj = req.get("body") or {}
+                            mode = body_obj.get("mode","none")
+                            if mode=="raw":
+                                body_type = "json" if "json" in body_obj.get("options",{}).get("raw",{}).get("language","") else "raw"
+                                body_content = body_obj.get("raw","")
+                            elif mode=="urlencoded":
+                                body_type="urlencoded"
+                                body_content=json.dumps({x["key"]:x.get("value","") for x in body_obj.get("urlencoded",[]) if not x.get("disabled")})
+                            elif mode=="formdata":
+                                body_type="form"
+                                body_content=json.dumps({x["key"]:x.get("value","") for x in body_obj.get("formdata",[]) if not x.get("disabled")})
+                            auth_type="none"; auth_data={}
+                            auth_obj  = req.get("auth") or {}
+                            a_type    = auth_obj.get("type","noauth")
+                            if a_type=="basic":
+                                auth_type="basic"; auth_data={x["key"]:x.get("value","") for x in auth_obj.get("basic",[])}
+                            elif a_type=="bearer":
+                                auth_type="bearer"; auth_data={"token":next((x.get("value","") for x in auth_obj.get("bearer",[]) if x["key"]=="token"),"")}
+                            elif a_type=="apikey":
+                                auth_type="apikey"; auth_data={x["key"]:x.get("value","") for x in auth_obj.get("apikey",[])}
+                            conn.execute(
+                                "INSERT INTO requests (collection_id,folder_id,name,method,url,params,headers,body_type,body_content,auth_type,auth_data) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                                (cid,parent_folder_id,item_name,method,url,json.dumps(params),json.dumps(headers),body_type,body_content,auth_type,json.dumps(auth_data))
+                            )
+                
+                process_items(data.get("item",[]))
             return jsonify({"ok":True,"id":cid,"name":name})
 
         return jsonify({"error":"Unrecognised file. Export from Postman (v2/v2.1) or use a RequestLab export."}), 400
@@ -453,11 +760,16 @@ def duplicate_folder(fid):
 
 @app.route("/api/requests", methods=["POST"])
 def save_request():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
     d = request.json or {}
+    cid = d.get("collection_id")
     with get_db() as conn:
+        col = conn.execute("SELECT user_id FROM collections WHERE id=?", (cid,)).fetchone()
+        if not col or col["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
         rid = conn.execute(
             "INSERT INTO requests (collection_id,folder_id,name,method,url,params,headers,body_type,body_content,auth_type,auth_data) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (d.get("collection_id"), d.get("folder_id"), d.get("name","Untitled"), d.get("method","GET"),
+            (cid, d.get("folder_id"), d.get("name","Untitled"), d.get("method","GET"),
              d.get("url",""), json.dumps(d.get("params",[])), json.dumps(d.get("headers",[])),
              d.get("body_type","none"), d.get("body_content",""),
              d.get("auth_type","none"), json.dumps(d.get("auth_data",{})))
@@ -466,8 +778,13 @@ def save_request():
 
 @app.route("/api/requests/<int:rid>", methods=["GET"])
 def get_request(rid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
     with get_db() as conn:
-        r = conn.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone()
+        r = conn.execute(
+            "SELECT r.* FROM requests r JOIN collections c ON r.collection_id = c.id WHERE r.id=? AND c.user_id=?", 
+            (rid, uid)
+        ).fetchone()
     if not r: return jsonify({"error": "Not found"}), 404
     d = dict(r)
     d["params"]    = json.loads(d["params"])
@@ -477,8 +794,12 @@ def get_request(rid):
 
 @app.route("/api/requests/<int:rid>", methods=["PUT"])
 def update_request(rid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
     d = request.json or {}
     with get_db() as conn:
+        r = conn.execute("SELECT c.user_id FROM requests r JOIN collections c ON r.collection_id = c.id WHERE r.id=?", (rid,)).fetchone()
+        if not r or r["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
         conn.execute(
             "UPDATE requests SET name=?,method=?,url=?,params=?,headers=?,body_type=?,body_content=?,auth_type=?,auth_data=?,folder_id=? WHERE id=?",
             (d.get("name","Untitled"), d.get("method","GET"), d.get("url",""),
@@ -491,14 +812,22 @@ def update_request(rid):
 
 @app.route("/api/requests/<int:rid>/rename", methods=["PUT"])
 def rename_request(rid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
     name = (request.json or {}).get("name","Untitled")
     with get_db() as conn:
+        r = conn.execute("SELECT c.user_id FROM requests r JOIN collections c ON r.collection_id = c.id WHERE r.id=?", (rid,)).fetchone()
+        if not r or r["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
         conn.execute("UPDATE requests SET name=? WHERE id=?", (name, rid))
     return jsonify({"ok": True})
 
 @app.route("/api/requests/<int:rid>", methods=["DELETE"])
 def delete_request(rid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
     with get_db() as conn:
+        r = conn.execute("SELECT c.user_id FROM requests r JOIN collections c ON r.collection_id = c.id WHERE r.id=?", (rid,)).fetchone()
+        if not r or r["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
         conn.execute("DELETE FROM requests WHERE id=?", (rid,))
     return jsonify({"ok": True})
 
@@ -519,11 +848,17 @@ def duplicate_request(rid):
 
 @app.route("/api/history", methods=["GET"])
 def get_history():
+    uid = get_current_user_id()
     limit = int(request.args.get("limit", 50))
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id,method,url,status_code,duration_ms,timestamp FROM history ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
+        if uid:
+            rows = conn.execute(
+                "SELECT id,method,url,status_code,duration_ms,timestamp FROM history WHERE user_id=? ORDER BY id DESC LIMIT ?", (uid, limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id,method,url,status_code,duration_ms,timestamp FROM history WHERE user_id IS NULL ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
     return jsonify([dict(r) for r in rows])
 
 @app.route("/api/history/<int:hid>", methods=["GET"])
@@ -546,8 +881,12 @@ def clear_history():
 
 @app.route("/api/environments", methods=["GET"])
 def list_environments():
+    uid = get_current_user_id()
     with get_db() as conn:
-        rows = conn.execute("SELECT * FROM environments ORDER BY id").fetchall()
+        if uid:
+            rows = conn.execute("SELECT * FROM environments WHERE user_id=? ORDER BY id", (uid,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM environments WHERE user_id IS NULL ORDER BY id").fetchall()
     return jsonify([dict(r) for r in rows])
 
 @app.route("/api/environments", methods=["POST"])
@@ -555,8 +894,9 @@ def create_environment():
     d = request.json or {}
     name = d.get("name", "New Environment")
     vars_ = json.dumps(d.get("vars", {}))
+    uid = get_current_user_id()
     with get_db() as conn:
-        eid = conn.execute("INSERT INTO environments (name,vars) VALUES (?,?)", (name, vars_)).lastrowid
+        eid = conn.execute("INSERT INTO environments (name,vars,user_id) VALUES (?,?,?)", (name, vars_, uid)).lastrowid
     return jsonify({"id": eid, "name": name, "vars": {}, "active": 0})
 
 @app.route("/api/environments/<int:eid>", methods=["PUT"])
@@ -583,12 +923,195 @@ def delete_environment(eid):
 
 # ─── Frontend ─────────────────────────────────────────────────────────────────
 
+LANDING_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RequestLab - Next-Gen API Client</title>
+<link rel="icon" type="image/png" href="/media/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #080c10;
+  --bg-glass: rgba(13, 17, 23, 0.7);
+  --acc: #00d4ff;
+  --acc-glow: #00d4ff60;
+  --acc2: #79c0ff;
+  --txt: #cdd9e5;
+  --txt-dim: #8b9eb5;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Space Grotesk', sans-serif;
+  background: var(--bg);
+  color: var(--txt);
+  min-height: 100vh;
+  overflow-x: hidden;
+  position: relative;
+}
+.blob { position: absolute; border-radius: 50%; filter: blur(80px); z-index: 0; opacity: 0.5; animation: float 12s infinite alternate ease-in-out; }
+.blob.one { top: -10%; left: -10%; width: 400px; height: 400px; background: #00d4ff; }
+.blob.two { bottom: 10%; right: -5%; width: 500px; height: 500px; background: #d2a8ff; animation-delay: -5s; }
+.blob.three { top: 40%; left: 40%; width: 300px; height: 300px; background: #3dd68c; animation-delay: -2s; opacity: 0.3;}
+
+@keyframes float {
+  0% { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(50px, 80px) scale(1.1); }
+}
+
+.noise {
+  position: fixed; inset: 0; z-index: 1; opacity: 0.04; pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+}
+
+.nav {
+  position: relative; z-index: 10; display: flex; align-items: center; justify-content: space-between;
+  padding: 24px 60px; max-width: 1400px; margin: 0 auto;
+}
+.logo { font-size: 24px; font-weight: 700; display: flex; align-items: center; gap: 12px; color: #fff; text-decoration: none;}
+.logo-icon { width: 44px; height: 44px; border-radius: 10px; box-shadow: 0 0 30px var(--acc-glow); filter: drop-shadow(0 0 12px var(--acc-glow)) brightness(1.1); transition: transform 0.3s; }
+.logo:hover .logo-icon { transform: scale(1.1) rotate(5deg); }
+
+.nav-links a { color: var(--txt-dim); text-decoration: none; font-weight: 500; margin-left: 32px; transition: color 0.2s; }
+.nav-links a:hover { color: #fff; }
+
+.btn-launch {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  padding: 14px 32px; font-size: 16px; font-weight: 600; color: #000; text-decoration: none;
+  background: var(--acc); border-radius: 30px; transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+  box-shadow: 0 0 20px var(--acc-glow), inset 0 -2px 0 rgba(0,0,0,0.1); overflow: hidden;
+}
+.btn-launch::before {
+  content: ''; position: absolute; top: 0; left: -100%; width: 100%; height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
+  transition: left 0.5s;
+}
+.btn-launch:hover { transform: translateY(-3px) scale(1.02); box-shadow: 0 10px 30px var(--acc-glow); }
+.btn-launch:hover::before { left: 100%; }
+
+.hero {
+  position: relative; z-index: 10; max-width: 1200px; margin: 0 auto; padding: 120px 20px;
+  text-align: center; display: flex; flex-direction: column; align-items: center;
+}
+.badge {
+  display: inline-flex; align-items: center; gap: 8px; padding: 6px 16px; border-radius: 20px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+  font-size: 13px; font-weight: 600; color: var(--acc2); margin-bottom: 24px;
+  backdrop-filter: blur(10px);
+}
+.badge span { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--acc2); box-shadow: 0 0 8px var(--acc2); }
+
+.hero h1 {
+  font-size: clamp(48px, 6vw, 84px); font-weight: 700; line-height: 1.05; letter-spacing: -2px;
+  color: #fff; margin-bottom: 30px; max-width: 900px;
+}
+.hero h1 span {
+  background: linear-gradient(135deg, var(--acc), #d2a8ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.hero p {
+  font-size: 20px; color: var(--txt-dim); max-width: 600px; line-height: 1.6; margin-bottom: 48px;
+}
+
+.dashboard-preview {
+  position: relative; z-index: 10; width: 90%; max-width: 1100px; margin: 0 auto 100px;
+  height: 600px; border-radius: 16px; background: rgba(13, 17, 23, 0.8); backdrop-filter: blur(20px);
+  border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 40px 100px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,212,255,0.1);
+  overflow: hidden; display: flex; flex-direction: column;
+}
+.dp-header { height: 40px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; padding: 0 16px; gap: 8px;}
+.dp-dot { width: 12px; height: 12px; border-radius: 50%; background: #f47067; }
+.dp-dot:nth-child(2) { background: #e3b341; }
+.dp-dot:nth-child(3) { background: #3dd68c; }
+.dp-content {
+  flex: 1; display: flex; flex-direction: column; padding: 20px; background: url("data:image/svg+xml,%3Csvg width='20' height='20' viewBox='0 0 20 20' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='2' cy='2' r='1' fill='rgba(255,255,255,0.05)'/%3E%3C/svg%3E");
+}
+
+.features {
+  position: relative; z-index: 10; max-width: 1200px; margin: 0 auto 120px;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 30px; padding: 0 20px;
+}
+.feature-card {
+  background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 16px;
+  padding: 40px 30px; transition: all 0.3s; backdrop-filter: blur(10px);
+}
+.feature-card:hover {
+  background: rgba(255,255,255,0.04); border-color: rgba(0,212,255,0.2); transform: translateY(-5px);
+}
+.fc-icon { font-size: 32px; margin-bottom: 20px; display: inline-block; }
+.fc-title { font-size: 22px; font-weight: 600; color: #fff; margin-bottom: 12px; }
+.fc-desc { font-size: 15px; color: var(--txt-dim); line-height: 1.6; }
+</style>
+</head>
+<body>
+  <div class="blob one"></div>
+  <div class="blob two"></div>
+  <div class="blob three"></div>
+  <div class="noise"></div>
+
+  <nav class="nav">
+    <a href="/" class="logo">
+      <img src="/media/logo.png" alt="Logo" class="logo-icon">
+      RequestLab
+    </a>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="/app">Go to App</a>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="badge"><span></span> v2.0 is live</div>
+    <h1>The API Workspace for the <span>Modern Web</span></h1>
+    <p>Ditch the bloated tools. RequestLab is a blazingly fast, multi-user, fully synced API client designed for developers who demand speed.</p>
+    <a href="/app" class="btn-launch">Launch Workspace</a>
+  </section>
+
+  <div class="dashboard-preview">
+    <div class="dp-header">
+      <div class="dp-dot"></div><div class="dp-dot"></div><div class="dp-dot"></div>
+    </div>
+    <div class="dp-content">
+      <div style="width: 100%; height: 60px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; margin-bottom: 16px; display: flex; align-items: center; padding: 0 16px; gap: 12px;">
+        <div style="padding: 4px 10px; background: rgba(0,212,255,0.1); color: #00d4ff; border-radius: 4px; font-size: 12px; font-weight: bold;">GET</div>
+        <div style="font-family: monospace; color: #fff;">{{base_url}}/api/v1/users</div>
+        <div style="margin-left: auto; padding: 8px 24px; background: #00d4ff; color: #000; border-radius: 4px; font-weight: bold; font-size: 13px;">Send</div>
+      </div>
+      <div style="flex: 1; display: flex; gap: 16px;">
+        <div style="flex: 1; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.03); border-radius: 8px;"></div>
+        <div style="flex: 2; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.03); border-radius: 8px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <section id="features" class="features">
+    <div class="feature-card">
+      <div class="fc-icon">⚡</div>
+      <div class="fc-title">Lightning Fast</div>
+      <div class="fc-desc">Built with a lightweight stack to ensure zero lag, instant switching, and a buttery smooth developer experience.</div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon">🔒</div>
+      <div class="fc-title">Multi-User Sync</div>
+      <div class="fc-desc">Securely login to sync your collections, environments, and history across all your devices instantly.</div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon">🎯</div>
+      <div class="fc-title">Smart Variables</div>
+      <div class="fc-desc">Powerful environment variables with native tooltip previews and seamless collection management.</div>
+    </div>
+  </section>
+</body>
+</html>"""
+
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RequestLab</title>
+<link rel="icon" type="image/png" href="/media/logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -655,40 +1178,38 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .coll-icon{font-size:13px;opacity:.7}
 .coll-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .coll-count{font-size:10px;color:var(--txt3);background:var(--bg3);padding:1px 6px;border-radius:10px;font-family:var(--mono)}
-.coll-actions{display:none;gap:2px}
+.coll-actions{display:none;gap:3px;align-items:center}
 .coll-header:hover .coll-actions{display:flex}
-.coll-act-btn{background:none;border:none;color:var(--txt3);cursor:pointer;padding:2px 5px;border-radius:3px;font-size:11px;transition:all .15s}
-.coll-act-btn:hover{color:var(--txt);background:var(--bg4)}
-.coll-act-btn.danger:hover{color:var(--red)}
-.coll-act-btn.accent-btn:hover{color:var(--acc)}
-.req-list{margin-left:0;display:none;flex-direction:column;gap:1px;padding:2px 0}
+.coll-act-btn, .req-act-btn{background:transparent;border:1px solid transparent;color:var(--txt3);cursor:pointer;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;border-radius:4px;transition:all .15s ease;padding:0}
+.coll-act-btn:hover, .req-act-btn:hover{background:var(--bg4);color:var(--txt);border-color:var(--border2);box-shadow:0 2px 5px rgba(0,0,0,0.2)}
+.coll-act-btn.danger:hover, .req-act-btn.danger:hover{background:rgba(244,112,103,.15);color:var(--red);border-color:rgba(244,112,103,.4)}
+.coll-act-btn.accent-btn:hover, .req-act-btn.dup:hover{background:var(--acc-dim);color:var(--acc);border-color:rgba(0,212,255,.3)}
+.req-list{margin-left:11px; border-left:1px solid var(--border); padding-left:4px; display:none;flex-direction:column;gap:1px;padding-top:2px;padding-bottom:4px}
 .req-list.open{display:flex}
 
 /* ── Folder nodes ── */
 .folder-node{margin-bottom:1px}
-.folder-hdr{display:flex;align-items:center;gap:5px;padding:5px 8px;cursor:pointer;font-size:11.5px;font-weight:600;color:var(--txt2);user-select:none;border-radius:var(--radius);transition:all .15s}
+.folder-hdr{display:flex;align-items:center;gap:5px;padding:5px 8px;cursor:pointer;font-size:11.5px;font-weight:600;color:var(--txt2);user-select:none;border-radius:var(--radius);transition:all .15s;position:relative}
+.folder-hdr::before{content:'';position:absolute;left:-5px;top:14px;width:5px;height:1px;background:var(--border);pointer-events:none}
 .folder-hdr:hover{background:var(--bg3);color:var(--txt)}
 .folder-nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fold-count{font-size:9.5px;color:var(--txt3);background:var(--bg3);padding:1px 5px;border-radius:10px;font-family:var(--mono)}
-.fold-acts{display:none;gap:2px}
+.fold-acts{display:none;gap:3px;align-items:center}
 .folder-hdr:hover .fold-acts{display:flex}
-.folder-children{border-left:1px solid var(--border);margin-left:13px;display:none;flex-direction:column;gap:1px;padding:2px 0}
+.folder-children{border-left:1px solid var(--border);margin-left:15px;padding-left:4px;display:none;flex-direction:column;gap:1px;padding-top:2px;padding-bottom:2px}
 .folder-children.open{display:flex}
 .f-arrow{font-size:8px;transition:transform .2s;flex-shrink:0;opacity:.5;min-width:10px}
 .f-arrow.open{transform:rotate(90deg);opacity:1}
 
 /* ── Request items ── */
-.req-item{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:var(--radius);cursor:pointer;font-size:11px;color:var(--txt3);transition:all .12s;border:1px solid transparent}
+.req-item{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:var(--radius);cursor:pointer;font-size:11px;color:var(--txt3);transition:all .12s;border:1px solid transparent;position:relative}
+.req-item::before{content:'';position:absolute;left:-5px;top:14px;width:5px;height:1px;background:var(--border);pointer-events:none}
 .req-item:hover{background:var(--bg3);color:var(--txt2);border-color:var(--border)}
 .req-item.active{background:var(--acc-dim);color:var(--acc);border-color:var(--acc-dim)}
 .req-method{font-family:var(--mono);font-size:9.5px;font-weight:600;min-width:36px;letter-spacing:.3px}
 .req-name-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-.req-item-actions{display:none;gap:1px;margin-left:auto;flex-shrink:0}
+.req-item-actions{display:none;gap:3px;margin-left:auto;flex-shrink:0;align-items:center}
 .req-item:hover .req-item-actions{display:flex}
-.req-act-btn{background:none;border:none;color:var(--txt3);cursor:pointer;padding:1px 4px;border-radius:3px;font-size:10px;transition:all .15s}
-.req-act-btn:hover{color:var(--txt)}
-.req-act-btn.danger:hover{color:var(--red)}
-.req-act-btn.dup:hover{color:var(--acc)}
 
 /* ── History ── */
 .hist-item{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:var(--radius);cursor:pointer;font-size:11px;color:var(--txt2);transition:all .12s;margin-bottom:1px}
@@ -720,9 +1241,26 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .req-name-display:hover{border-color:var(--border2);color:var(--txt)}
 .method-select{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius);padding:7px 10px;font-size:12px;font-weight:700;color:var(--green);cursor:pointer;outline:none;font-family:var(--mono);transition:border-color .15s}
 .method-select:hover,.method-select:focus{border-color:var(--border3)}
-.url-input{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:8px 14px;font-size:12px;color:var(--txt);font-family:var(--mono);outline:none;transition:all .15s}
+.url-input-wrap{flex:1;position:relative;overflow:hidden}
+.url-input{width:100%;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:8px 14px;font-size:12px;color:var(--txt);font-family:var(--mono);outline:none;transition:all .15s;position:relative;z-index:1}
 .url-input:focus{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-dim)}
 .url-input::placeholder{color:var(--txt3)}
+.url-input.has-vars{/* removed transparent text hack, input renders normally */}
+.url-highlight-layer{position:absolute;top:0;left:0;right:0;bottom:0;padding:8px 14px;font-size:12px;font-family:var(--mono);pointer-events:none;white-space:pre;overflow:hidden;border-radius:var(--radius);z-index:2;color:transparent;border:1px solid transparent;line-height:16px;letter-spacing:normal;word-spacing:normal}
+.url-input{line-height:16px;letter-spacing:normal;word-spacing:normal}
+.var-badge{background:var(--bg2);color:#ff8c32;border-radius:3px;padding:0 2px;font-weight:600;position:relative;cursor:default;box-shadow:inset 0 0 0 1px rgba(255,140,50,.25)}
+.var-badge.resolved{background:var(--bg2);color:#3dd68c;box-shadow:inset 0 0 0 1px rgba(60,200,120,.25)}
+.var-badge.unresolved{background:var(--bg2);color:#f47067;box-shadow:inset 0 0 0 1px rgba(244,112,103,.25)}
+.var-tooltip{position:absolute;background:var(--bg2);border:1px solid var(--border2);border-radius:6px;padding:4px 10px;font-size:10px;font-family:var(--mono);white-space:nowrap;z-index:99999;pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.4);display:none}
+.var-tooltip::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--border2)}
+.var-tooltip .vt-key{color:var(--txt3)}
+.var-tooltip .vt-arrow{color:var(--txt3);margin:0 4px}
+.var-tooltip .vt-val{color:#3dd68c;font-weight:600}
+.var-tooltip .vt-unresolved{color:#f47067;font-style:italic}
+.kv-input.has-var{box-shadow:inset 0 0 0 1px rgba(255,140,50,.35);background:rgba(255,140,50,.06)!important;border-radius:4px}
+.code-editor.has-var{box-shadow:inset 0 0 0 1px rgba(255,140,50,.3)}
+.auth-field input.has-var{box-shadow:inset 0 0 0 1px rgba(255,140,50,.35);background:rgba(255,140,50,.06)!important}
+.var-indicator{display:inline-flex;align-items:center;gap:4px;font-size:9px;color:#ff8c32;padding:2px 6px;background:rgba(255,140,50,.1);border-radius:4px;border:1px solid rgba(255,140,50,.2);margin-left:6px;font-family:var(--mono);letter-spacing:.3px}
 .btn-group{display:flex;gap:6px;flex-shrink:0}
 .save-btn{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius);padding:8px 14px;font-size:12px;font-weight:600;color:var(--txt2);cursor:pointer;font-family:var(--sans);transition:all .15s}
 .save-btn:hover{border-color:var(--border3);color:var(--txt)}
@@ -730,6 +1268,8 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .send-btn:hover{background:var(--acc2);box-shadow:0 0 20px var(--acc-glow);transform:translateY(-1px)}
 .send-btn:active{transform:translateY(0)}
 .send-btn:disabled{opacity:.5;cursor:wait;transform:none}
+.cancel-btn{background:transparent;border:1px solid var(--red);border-radius:var(--radius);padding:8px 14px;font-size:12px;font-weight:700;color:var(--red);cursor:pointer;font-family:var(--sans);transition:all .2s}
+.cancel-btn:hover{background:var(--red);color:#fff}
 
 /* ── Tabs ── */
 .tab-bar{display:flex;background:var(--bg1);border-bottom:1px solid var(--border);padding:0 16px;gap:0}
@@ -808,6 +1348,26 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .resp-headers-table td:first-child{color:var(--txt3);width:38%;white-space:nowrap}
 .resp-headers-table td:last-child{color:var(--txt);word-break:break-all}
 
+/* ── Response view mode tabs ── */
+.resp-view-bar{display:flex;gap:2px;align-items:center;margin-left:12px}
+.resp-view-btn{background:transparent;border:1px solid var(--border);border-radius:var(--radius);padding:3px 10px;font-size:10px;font-weight:600;color:var(--txt3);cursor:pointer;font-family:var(--mono);transition:all .15s;letter-spacing:.3px}
+.resp-view-btn:hover{color:var(--txt2);border-color:var(--border2)}
+.resp-view-btn.active{background:var(--acc-dim);border-color:var(--acc);color:var(--acc)}
+.resp-preview-iframe{width:100%;border:none;background:#fff;border-radius:var(--radius);min-height:200px}
+.resp-raw-pre{font-size:12px;font-family:var(--mono);line-height:1.65;white-space:pre-wrap;word-break:break-all;color:var(--txt3)}
+
+/* ── Var autocomplete dropdown ── */
+.var-autocomplete{position:absolute;z-index:500;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);max-height:180px;overflow-y:auto;min-width:200px;padding:4px;display:none}
+.var-ac-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-family:var(--mono);transition:background .1s}
+.var-ac-item:hover,.var-ac-item.selected{background:var(--bg4)}
+.var-ac-key{color:var(--acc);font-weight:600}
+.var-ac-val{color:var(--txt3);font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.var-ac-empty{padding:8px 10px;font-size:11px;color:var(--txt3);font-family:var(--mono);font-style:italic}
+
+/* ── Beautify button ── */
+.beautify-btn{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:3px 10px;font-size:10px;font-weight:600;color:var(--txt3);cursor:pointer;font-family:var(--mono);transition:all .15s;margin-left:auto}
+.beautify-btn:hover{border-color:var(--acc);color:var(--acc)}
+
 /* ── Environments ── */
 .env-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-xl);padding:16px;margin-bottom:10px;transition:border-color .15s}
 .env-card:hover{border-color:var(--border2)}
@@ -841,7 +1401,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .btn-secondary:hover{border-color:var(--border3);color:var(--txt)}
 
 /* ── Toast ── */
-#toast-container{position:fixed;bottom:20px;right:20px;z-index:999;display:flex;flex-direction:column;gap:8px}
+#toast-container{position:fixed;bottom:20px;right:20px;z-index:10000;display:flex;flex-direction:column;gap:8px}
 .toast{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius-lg);padding:10px 16px;font-size:12px;color:var(--txt);font-family:var(--sans);box-shadow:var(--shadow);animation:toastIn .2s ease-out;display:flex;align-items:center;gap:8px;min-width:220px}
 .toast.success{border-left:3px solid var(--green)}.toast.error{border-left:3px solid var(--red)}.toast.info{border-left:3px solid var(--acc)}
 @keyframes toastIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
@@ -862,11 +1422,91 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 
 /* ── Quick action separator ── */
 .tree-empty{color:var(--txt3);font-size:11px;padding:6px 10px;font-family:var(--mono);font-style:italic}
+
+/* ── User Menu ── */
+.user-menu{position:relative;display:flex;align-items:center}
+.user-avatar-btn{background:none;border:none;cursor:pointer;padding:0;display:flex;align-items:center}
+.user-avatar{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#000;text-transform:uppercase;box-shadow:0 0 8px rgba(0,0,0,.3);transition:box-shadow .15s}
+.user-avatar:hover{box-shadow:0 0 14px rgba(0,212,255,.4)}
+.user-dropdown{position:absolute;top:calc(100% + 8px);right:0;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.5);min-width:200px;padding:6px;z-index:100;display:none}
+.user-dropdown.open{display:block}
+.user-dd-header{padding:10px 12px}
+.user-dd-name{display:block;font-size:13px;font-weight:700;color:var(--txt)}
+.user-dd-email{display:block;font-size:11px;color:var(--txt3);margin-top:2px}
+.user-dd-divider{height:1px;background:var(--border);margin:4px 0}
+.user-dd-item{display:block;width:100%;text-align:left;background:none;border:none;color:var(--txt2);padding:8px 12px;border-radius:6px;font-size:12px;cursor:pointer;font-family:var(--sans);transition:all .12s}
+.user-dd-item:hover{background:var(--bg4);color:var(--red)}
+
+/* ── Auth Gate ── */
+.auth-gate{position:fixed;inset:0;background:var(--bg0);z-index:9999;display:flex;align-items:center;justify-content:center}
+.auth-card{background:var(--bg1);border:1px solid var(--border2);border-radius:16px;padding:36px 32px;width:100%;max-width:380px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.auth-logo{display:flex;align-items:center;gap:10px;justify-content:center;margin-bottom:24px}
+.auth-logo .logo-mark{width:36px;height:36px;font-size:17px}
+.auth-logo .logo-text{font-size:20px}
+.auth-tabs{display:flex;gap:0;margin-bottom:20px;border-bottom:1px solid var(--border)}
+.auth-tab{flex:1;padding:10px 0;text-align:center;font-size:12px;font-weight:600;color:var(--txt3);cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;background:none;border-top:none;border-left:none;border-right:none;font-family:var(--sans);letter-spacing:.5px;text-transform:uppercase}
+.auth-tab:hover{color:var(--txt2)}
+.auth-tab.active{color:var(--acc);border-bottom-color:var(--acc)}
+.auth-form{display:flex;flex-direction:column;gap:12px}
+.auth-form input{width:100%;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;font-size:13px;color:var(--txt);font-family:var(--mono);outline:none;transition:border-color .15s;box-sizing:border-box}
+.auth-form input:focus{border-color:var(--acc)}
+.auth-form input::placeholder{color:var(--txt3)}
+.auth-submit{background:var(--acc);border:none;border-radius:var(--radius);padding:10px;font-size:13px;font-weight:700;color:#000;cursor:pointer;font-family:var(--sans);transition:all .15s;letter-spacing:.3px}
+.auth-submit:hover{background:var(--acc2);box-shadow:0 0 16px var(--acc-glow)}
+.auth-submit:disabled{opacity:.5;cursor:wait}
+.auth-error{color:var(--red);font-size:11px;font-family:var(--mono);text-align:center;min-height:16px}
+.auth-skip{display:block;text-align:center;margin-top:14px;font-size:11px;color:var(--txt3);cursor:pointer;font-family:var(--mono);transition:color .15s;background:none;border:none;width:100%}
+.auth-skip:hover{color:var(--acc)}
 </style>
 </head>
 <body>
 
-<div id="app">
+<!-- Auth Gate -->
+<div class="auth-gate" id="auth-gate" style="display:none">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <img src="/media/logo.png" alt="Logo" style="width: 52px; height: 52px; border-radius: 12px; filter: drop-shadow(0 0 15px rgba(0, 212, 255, 0.3)) brightness(1.1);">
+      <div class="logo-text" style="font-size: 28px;">Request<span>Lab</span></div>
+    </div>
+    <div class="auth-tabs">
+      <button class="auth-tab active" onclick="authTab('login')" id="at-login">Sign In</button>
+      <button class="auth-tab" onclick="authTab('register')" id="at-register">Create Account</button>
+    </div>
+    <div class="auth-error" id="auth-error"></div>
+    <!-- Login form -->
+    <form class="auth-form" id="login-form" onsubmit="doLogin(event)">
+      <input id="login-field" type="text" placeholder="Username or Email" autocomplete="username" required>
+      <input id="login-pw" type="password" placeholder="Password" autocomplete="current-password" required>
+      <button type="submit" class="auth-submit" id="login-btn">Sign In</button>
+      <a href="#" onclick="authTab('forgot'); return false;" style="font-size:11px;color:var(--txt3);text-align:right;margin-top:-6px;text-decoration:none;">Forgot password?</a>
+    </form>
+    <!-- Forgot password form -->
+    <form class="auth-form" id="forgot-form" style="display:none" onsubmit="doForgotPassword(event)">
+      <div style="font-size:12px;color:var(--txt2);text-align:center;margin-bottom:12px">Enter your email to receive a password reset link.</div>
+      <input id="forgot-email" type="email" placeholder="Email Address" required>
+      <button type="submit" class="auth-submit" id="forgot-btn">Send Reset Link</button>
+      <a href="#" onclick="authTab('login'); return false;" style="font-size:11px;color:var(--txt3);text-align:center;text-decoration:none;margin-top:6px;">← Back to Sign In</a>
+    </form>
+    <!-- Reset password form (shown via link) -->
+    <form class="auth-form" id="reset-form" style="display:none" onsubmit="doResetPassword(event)">
+      <div style="font-size:12px;color:var(--txt2);text-align:center;margin-bottom:12px">Set a new password.</div>
+      <input id="reset-token" type="hidden">
+      <input id="reset-pw" type="password" placeholder="New Password" required minlength="4">
+      <button type="submit" class="auth-submit" id="reset-btn">Save New Password</button>
+      <a href="#" onclick="authTab('login'); return false;" style="font-size:11px;color:var(--txt3);text-align:center;text-decoration:none;margin-top:6px;">← Back to Sign In</a>
+    </form>
+    <!-- Register form -->
+    <form class="auth-form" id="register-form" style="display:none" onsubmit="doRegister(event)">
+      <input id="reg-username" type="text" placeholder="Username" autocomplete="username" required>
+      <input id="reg-email" type="email" placeholder="Email" autocomplete="email" required>
+      <input id="reg-pw" type="password" placeholder="Password (min 4 chars)" autocomplete="new-password" required minlength="4">
+      <button type="submit" class="auth-submit" id="reg-btn">Create Account</button>
+    </form>
+    <button class="auth-skip" onclick="skipAuth()">Continue without account →</button>
+  </div>
+</div>
+
+<div id="app" style="display:none">
 
   <!-- Topbar -->
   <header id="topbar">
@@ -883,6 +1523,19 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
         <option value="">No Environment</option>
       </select>
       <div class="conn-dot" title="Server connected"></div>
+      <div id="user-menu" class="user-menu" style="display:none">
+        <button class="user-avatar-btn" id="user-avatar-btn" onclick="toggleUserDropdown()">
+          <span class="user-avatar" id="user-avatar">?</span>
+        </button>
+        <div class="user-dropdown" id="user-dropdown">
+          <div class="user-dd-header">
+            <span class="user-dd-name" id="user-dd-name"></span>
+            <span class="user-dd-email" id="user-dd-email"></span>
+          </div>
+          <div class="user-dd-divider"></div>
+          <button class="user-dd-item" onclick="attemptLogout()">Sign Out</button>
+        </div>
+      </div>
     </div>
   </header>
 
@@ -929,11 +1582,15 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
             <option>GET</option><option>POST</option><option>PUT</option>
             <option>PATCH</option><option>DELETE</option><option>HEAD</option><option>OPTIONS</option>
           </select>
-          <input id="url-input" class="url-input" type="text" placeholder="https://api.example.com/endpoint"
-            oninput="markTabDirty()" onkeydown="if(event.key==='Enter')sendRequest()">
+          <div class="url-input-wrap">
+            <input id="url-input" class="url-input" type="text" placeholder="https://api.example.com/endpoint"
+              oninput="markTabDirty();highlightUrlVars()" onkeydown="if(event.key==='Enter')sendRequest()" onscroll="syncHighlightScroll()">
+            <div class="url-highlight-layer" id="url-highlight-layer"></div>
+          </div>
           <div class="btn-group">
             <button class="save-btn" onclick="handleSave()">Save</button>
             <button class="send-btn" id="send-btn" onclick="sendRequest()">Send</button>
+            <button class="cancel-btn" id="cancel-btn" onclick="cancelRequest()" style="display:none">✕ Cancel</button>
           </div>
         </div>
 
@@ -970,6 +1627,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
               <button class="body-type-btn" onclick="setBodyType('raw')">raw</button>
               <button class="body-type-btn" onclick="setBodyType('form')">form-data</button>
               <button class="body-type-btn" onclick="setBodyType('urlencoded')">urlencoded</button>
+              <button class="beautify-btn" id="beautify-btn" style="display:none" onclick="beautifyBody()">✨ Beautify</button>
             </div>
             <div id="body-none-msg" style="color:var(--txt3);font-size:12px;font-family:var(--mono);padding:8px 0">This request does not have a body.</div>
             <textarea class="code-editor" id="body-editor" style="display:none" placeholder="Enter request body…" spellcheck="false" oninput="markTabDirty()"></textarea>
@@ -1013,6 +1671,11 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
           <div class="tab active" onclick="respTab('body')" id="rst-body">Body</div>
           <div class="tab" onclick="respTab('headers')" id="rst-headers">Headers</div>
           <div class="tab" onclick="respTab('cookies')" id="rst-cookies">Cookies</div>
+          <div class="resp-view-bar" id="resp-view-bar" style="display:none">
+            <button class="resp-view-btn active" onclick="setRespView('pretty')" id="rv-pretty">Pretty</button>
+            <button class="resp-view-btn" onclick="setRespView('raw')" id="rv-raw">Raw</button>
+            <button class="resp-view-btn" onclick="setRespView('preview')" id="rv-preview">Preview</button>
+          </div>
         </div>
         <div class="resp-body" id="resp-body-pane">
           <div class="empty-state" id="resp-empty">
@@ -1020,6 +1683,8 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
             <p>Hit <strong>Send</strong> to fire a request</p>
           </div>
           <pre id="resp-body-content" style="display:none"></pre>
+          <pre id="resp-body-raw" class="resp-raw-pre" style="display:none"></pre>
+          <iframe id="resp-body-preview" class="resp-preview-iframe" style="display:none" sandbox="allow-same-origin"></iframe>
         </div>
         <div class="resp-body" id="resp-headers-pane" style="display:none">
           <table class="resp-headers-table"><tbody id="resp-headers-tbody"></tbody></table>
@@ -1103,7 +1768,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
     </div>
     <div class="modal-actions">
       <button class="btn-secondary" onclick="closeModal('folder-modal')">Cancel</button>
-      <button class="btn-primary" onclick="confirmNewFolder()">Create Folder</button>
+      <button class="btn-primary" type="button" onclick="confirmNewFolder()">Create Folder</button>
     </div>
   </div>
 </div>
@@ -1173,7 +1838,46 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
   </div>
 </div>
 
+<!-- ══ Save Before Close Modal ══ -->
+<div class="modal-overlay" id="save-close-modal">
+  <div class="modal">
+    <div class="modal-header"><h3>Unsaved Changes</h3><button class="modal-close" onclick="closeModal('save-close-modal')">×</button></div>
+    <p style="font-size:12px;color:var(--txt2);font-family:var(--mono);line-height:1.6;margin-bottom:4px">This request has unsaved changes. What would you like to do?</p>
+    <div class="modal-actions" style="gap:8px">
+      <button class="btn-secondary" onclick="discardAndClose()" style="color:var(--red);border-color:var(--red)">Don't Save</button>
+      <button class="btn-secondary" onclick="closeModal('save-close-modal')">Cancel</button>
+      <button class="btn-primary" onclick="saveAndClose()">Save & Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Logout Confirm Modal ══ -->
+<div class="modal-overlay" id="logout-confirm-modal">
+  <div class="modal">
+    <div class="modal-header"><h3>Unsaved Changes</h3><button class="modal-close" onclick="closeModal('logout-confirm-modal')">×</button></div>
+    <p style="font-size:12px;color:var(--txt2);font-family:var(--mono);line-height:1.6;margin-bottom:4px">You have unsaved tabs. Logging out will discard these changes. What would you like to do?</p>
+    <div class="modal-actions" style="gap:8px">
+      <button class="btn-secondary" onclick="closeModal('logout-confirm-modal')">Cancel</button>
+      <button class="btn-primary" onclick="closeModal('logout-confirm-modal'); doLogout();" style="background:var(--red);color:#fff;border-color:var(--red)">Discard & Log Out</button>
+    </div>
+  </div>
+</div>
+
+<div id="global-var-tooltip" class="var-tooltip"></div>
+
 <script>
+const ICONS = {
+  filePlus: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>`,
+  folderPlus: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><line x1="9" y1="14" x2="15" y2="14"></line></svg>`,
+  download: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`,
+  edit: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>`,
+  copy: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,
+  trash: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`,
+  cross: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`,
+  folder: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`,
+  folderOpen: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><polyline points="10 13 14 13 14 17"></polyline></svg>`
+};
+
 // ══════════════════════════════════════════════════════════
 //  TAB SYSTEM
 // ══════════════════════════════════════════════════════════
@@ -1187,6 +1891,8 @@ function makeTabState(o={}) {
   }, o);
 }
 let tabs=[], activeTabIdx=-1;
+let currentAbortController=null;
+
 function currentTab(){ return tabs[activeTabIdx]||null; }
 
 function snapshotTab(){
@@ -1260,12 +1966,7 @@ function newTab(o={}){
 }
 
 function closeTab(e,idx){
-  e.stopPropagation();
-  if(tabs.length===1){ tabs[0]=makeTabState(); activeTabIdx=0; restoreTab(tabs[0]); renderTabBar(); return; }
-  tabs.splice(idx,1);
-  if(activeTabIdx>=tabs.length) activeTabIdx=tabs.length-1;
-  else if(activeTabIdx>idx) activeTabIdx--;
-  restoreTab(tabs[activeTabIdx]); renderTabBar();
+  closeTabSafe(e,idx);
 }
 
 function markTabDirty(){ const t=currentTab(); if(t&&!t.dirty){t.dirty=true;renderTabBar();} }
@@ -1279,16 +1980,214 @@ const S = {
   renameCollId:null, renameReqId:null, renameFolderId:null,
   newFolderCollId:null, newFolderParentId:null,
   quickAddCollId:null, quickAddFolderId:null,
+  currentUser:null, pendingCloseIdx:null,
 };
+
+// ══════════════════════════════════════════════════════════
+//  AUTH UI
+// ══════════════════════════════════════════════════════════
+function authTab(tab){
+  document.getElementById('at-login').classList.toggle('active',tab==='login'||tab==='reset'||tab==='forgot');
+  document.getElementById('at-register').classList.toggle('active',tab==='register');
+  document.getElementById('login-form').style.display=tab==='login'?'flex':'none';
+  document.getElementById('register-form').style.display=tab==='register'?'flex':'none';
+  document.getElementById('forgot-form').style.display=tab==='forgot'?'flex':'none';
+  document.getElementById('reset-form').style.display=tab==='reset'?'flex':'none';
+  document.getElementById('auth-error').textContent='';
+}
+
+async function doLogin(e){
+  e.preventDefault();
+  const btn=document.getElementById('login-btn'); btn.disabled=true;
+  document.getElementById('auth-error').textContent='';
+  try {
+    const res=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({login:document.getElementById('login-field').value,password:document.getElementById('login-pw').value})});
+    const data=await res.json();
+    if(data.error){ document.getElementById('auth-error').textContent=data.error; return; }
+    S.currentUser=data.user;
+    showApp();
+  } finally { btn.disabled=false; }
+}
+
+async function doRegister(e){
+  e.preventDefault();
+  const btn=document.getElementById('reg-btn'); btn.disabled=true;
+  document.getElementById('auth-error').textContent='';
+  try {
+    const res=await fetch('/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('reg-username').value,email:document.getElementById('reg-email').value,password:document.getElementById('reg-pw').value})});
+    const data=await res.json();
+    if(data.error){ document.getElementById('auth-error').textContent=data.error; return; }
+    S.currentUser=data.user;
+    showApp();
+  } finally { btn.disabled=false; }
+}
+
+async function doForgotPassword(e){
+  e.preventDefault();
+  const btn=document.getElementById('forgot-btn'); btn.disabled=true;
+  document.getElementById('auth-error').textContent='';
+  try {
+    const res=await fetch('/api/auth/forgot-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:document.getElementById('forgot-email').value})});
+    const data=await res.json();
+    if(data.error){ document.getElementById('auth-error').textContent=data.error; return; }
+    toast(data.message, 'success');
+    authTab('login');
+  } finally { btn.disabled=false; }
+}
+
+async function doResetPassword(e){
+  e.preventDefault();
+  const btn=document.getElementById('reset-btn'); btn.disabled=true;
+  document.getElementById('auth-error').textContent='';
+  try {
+    const res=await fetch('/api/auth/reset-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:document.getElementById('reset-token').value,new_password:document.getElementById('reset-pw').value})});
+    const data=await res.json();
+    if(data.error){ document.getElementById('auth-error').textContent=data.error; return; }
+    toast('Password reset successfully! Please sign in.','success');
+    // Clear URL query parameters
+    window.history.replaceState({}, document.title, window.location.pathname);
+    authTab('login');
+  } finally { btn.disabled=false; }
+}
+
+function skipAuth(){
+  S.currentUser=null;
+  showApp();
+}
+
+function attemptLogout(){
+  document.getElementById('user-dropdown').classList.remove('open');
+  if(activeTabIdx >= 0) snapshotTab();
+  if(tabs.some(t => t.dirty)) {
+    openModal('logout-confirm-modal');
+  } else {
+    doLogout();
+  }
+}
+
+async function doLogout(){
+  await fetch('/api/auth/logout',{method:'POST'});
+  S.currentUser=null;
+  // Clear open tabs so they don't leak to the next user
+  tabs = [makeTabState()];
+  activeTabIdx = 0;
+  restoreTab(tabs[0]);
+  renderTabBar();
+  
+  document.getElementById('app').style.display='none';
+  document.getElementById('auth-gate').style.display='flex';
+  document.getElementById('user-menu').style.display='none';
+  document.getElementById('auth-error').textContent='';
+  document.getElementById('login-field').value='';
+  document.getElementById('login-pw').value='';
+  authTab('login');
+}
+
+function toggleUserDropdown(){
+  document.getElementById('user-dropdown').classList.toggle('open');
+}
+
+document.addEventListener('click',function(e){
+  const dd=document.getElementById('user-dropdown');
+  const btn=document.getElementById('user-avatar-btn');
+  if(dd&&btn&&!dd.contains(e.target)&&!btn.contains(e.target)) dd.classList.remove('open');
+});
+
+function showApp(){
+  document.getElementById('auth-gate').style.display='none';
+  document.getElementById('app').style.display='grid';
+  if(S.currentUser){
+    document.getElementById('user-menu').style.display='flex';
+    document.getElementById('user-avatar').textContent=S.currentUser.username.charAt(0).toUpperCase();
+    document.getElementById('user-avatar').style.background=S.currentUser.avatar_color||'#00d4ff';
+    document.getElementById('user-dd-name').textContent=S.currentUser.username;
+    document.getElementById('user-dd-email').textContent=S.currentUser.email||'';
+  } else {
+    document.getElementById('user-menu').style.display='none';
+  }
+  loadCollections(); loadHistory(); loadEnvironments();
+}
+
+// ══════════════════════════════════════════════════════════
+//  SAVE BEFORE CLOSE
+// ══════════════════════════════════════════════════════════
+function closeTabSafe(e,idx){
+  e.stopPropagation();
+  // If tab has unsaved changes, show confirmation
+  if(idx===activeTabIdx) snapshotTab();
+  const t=tabs[idx];
+  if(t&&t.dirty){
+    S.pendingCloseIdx=idx;
+    openModal('save-close-modal');
+    return;
+  }
+  doCloseTab(idx);
+}
+
+function doCloseTab(idx){
+  if(tabs.length===1){ tabs[0]=makeTabState(); activeTabIdx=0; restoreTab(tabs[0]); renderTabBar(); return; }
+  tabs.splice(idx,1);
+  if(activeTabIdx>=tabs.length) activeTabIdx=tabs.length-1;
+  else if(activeTabIdx>idx) activeTabIdx--;
+  restoreTab(tabs[activeTabIdx]); renderTabBar();
+}
+
+async function saveAndClose(){
+  const idx=S.pendingCloseIdx;
+  closeModal('save-close-modal');
+  if(idx==null) return;
+  // Switch to the tab to save it
+  if(idx!==activeTabIdx) switchTab(idx);
+  await handleSave();
+  doCloseTab(idx>=tabs.length?tabs.length-1:idx);
+  S.pendingCloseIdx=null;
+}
+
+function discardAndClose(){
+  const idx=S.pendingCloseIdx;
+  closeModal('save-close-modal');
+  if(idx==null) return;
+  tabs[idx].dirty=false;
+  doCloseTab(idx);
+  S.pendingCloseIdx=null;
+}
+
+// Browser close/refresh warning
+window.addEventListener('beforeunload',function(e){
+  if(tabs.some(t=>t.dirty)){
+    e.preventDefault();
+    e.returnValue='You have unsaved changes. Are you sure you want to leave?';
+  }
+});
 
 // ══════════════════════════════════════════════════════════
 //  INIT
 // ══════════════════════════════════════════════════════════
-document.addEventListener('DOMContentLoaded', ()=>{
+document.addEventListener('DOMContentLoaded', async ()=>{
   tabs.push(makeTabState()); activeTabIdx=0; renderTabBar();
   addKVRow('params'); addKVRow('headers');
-  loadCollections(); loadHistory(); loadEnvironments();
   setupResizeHandle(); renderAuthFields(); updateMethodColor();
+  // Check auth
+  try {
+    const res=await fetch('/api/auth/me');
+    const data=await res.json();
+    
+    const params = new URLSearchParams(window.location.search);
+    const resetToken = params.get('reset_token');
+
+    if(data.authenticated){
+      S.currentUser=data.user;
+      showApp();
+    } else if (resetToken) {
+      document.getElementById('reset-token').value = resetToken;
+      document.getElementById('auth-gate').style.display='flex';
+      authTab('reset');
+    } else {
+      document.getElementById('auth-gate').style.display='flex';
+    }
+  } catch(e){
+    document.getElementById('auth-gate').style.display='flex';
+  }
 });
 
 // ══════════════════════════════════════════════════════════
@@ -1422,6 +2321,7 @@ function setBodyType(type){
   document.querySelectorAll('.body-type-btn').forEach(b=>b.classList.toggle('active',b.textContent.trim()===type));
   document.getElementById('body-none-msg').style.display=type==='none'?'block':'none';
   document.getElementById('body-editor').style.display=['json','raw'].includes(type)?'block':'none';
+  document.getElementById('beautify-btn').style.display=type==='json'?'':'none';
   document.getElementById('body-kv-wrap').style.display=['form','urlencoded'].includes(type)?'block':'none';
   if(type==='json'&&!document.getElementById('body-editor').value.trim()) document.getElementById('body-editor').value='{\n  \n}';
 }
@@ -1469,6 +2369,209 @@ function substituteKVList(list){ return list.map(item=>({...item,key:substituteV
 function substituteAuthData(authType,authData){ const out={}; for(const [k,v] of Object.entries(authData)) out[k]=typeof v==='string'?substituteVars(v):v; return out; }
 
 // ══════════════════════════════════════════════════════════
+//  VARIABLE HIGHLIGHTING (Postman-style)
+// ══════════════════════════════════════════════════════════
+const VAR_RE=/\{\{(\w+)\}\}/g;
+
+function highlightUrlVars(){
+  const input=document.getElementById('url-input');
+  const layer=document.getElementById('url-highlight-layer');
+  if(!input||!layer) return;
+  const val=input.value;
+  const vars=getEnvVars();
+  let html='';
+  let last=0;
+  let m;
+  const re=new RegExp(VAR_RE.source,'g');
+  while((m=re.exec(val))!==null){
+    html+=escHtml(val.slice(last,m.index));
+    const varName=m[1];
+    const resolved=vars[varName];
+    const cls=resolved!==undefined?'resolved':'unresolved';
+    const ttVal=resolved!==undefined?`<span class="vt-key">${escHtml(varName)}</span><span class="vt-arrow">→</span><span class="vt-val">${escHtml(String(resolved))}</span>`:`<span class="vt-unresolved">undefined</span>`;
+    html+=`<span class="var-badge ${cls}" style="pointer-events:auto" onmouseenter="showGlobalTooltip(this, '${escHtml(ttVal)}')" onmouseleave="hideGlobalTooltip()">{{${escHtml(varName)}}}</span>`;
+    last=re.lastIndex;
+  }
+  html+=escHtml(val.slice(last));
+  const hasVars=last>0;
+  input.classList.toggle('has-vars',hasVars);
+  if(hasVars){
+    layer.innerHTML=html;
+    layer.scrollLeft=input.scrollLeft;
+    layer.style.display='';
+  } else {
+    layer.innerHTML='';
+    layer.style.display='none';
+  }
+}
+
+let tooltipTimer;
+function showGlobalTooltip(el, htmlVal){
+  clearTimeout(tooltipTimer);
+  const tt=document.getElementById('global-var-tooltip');
+  if(!tt) return;
+  tt.innerHTML=htmlVal;
+  tt.style.display='block';
+  const rect=el.getBoundingClientRect();
+  const ttRect=tt.getBoundingClientRect();
+  tt.style.left=(rect.left+rect.width/2-ttRect.width/2)+'px';
+  tt.style.top=(rect.top-ttRect.height-6)+'px';
+}
+function hideGlobalTooltip(){
+  tooltipTimer=setTimeout(()=>{
+    const tt=document.getElementById('global-var-tooltip');
+    if(tt) tt.style.display='none';
+  },50);
+}
+
+function syncHighlightScroll(){
+  const input=document.getElementById('url-input');
+  const layer=document.getElementById('url-highlight-layer');
+  if(input&&layer) layer.scrollLeft=input.scrollLeft;
+}
+
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function scanInputVars(){
+  const vars=getEnvVars();
+  const hasVars=Object.keys(vars).length>0;
+  // KV inputs in params and headers
+  document.querySelectorAll('.kv-input').forEach(inp=>{
+    const v=inp.value;
+    if(VAR_RE.test(v)){ inp.classList.add('has-var'); inp.title=v.replace(new RegExp(VAR_RE.source,'g'),(_,k)=>vars[k]!==undefined?`{{${k}}} → ${vars[k]}`:`{{${k}}} → [undefined]`); }
+    else { inp.classList.remove('has-var'); if(inp.title&&inp.title.includes('→')) inp.title=''; }
+  });
+  // Body editor
+  const bodyEd=document.getElementById('body-editor');
+  if(bodyEd){ if(VAR_RE.test(bodyEd.value)) bodyEd.classList.add('has-var'); else bodyEd.classList.remove('has-var'); }
+  // Auth fields
+  document.querySelectorAll('.auth-field input').forEach(inp=>{
+    if(VAR_RE.test(inp.value)) inp.classList.add('has-var'); else inp.classList.remove('has-var');
+  });
+}
+
+// Run variable scan periodically and on input
+setInterval(scanInputVars,800);
+setInterval(highlightUrlVars,800);
+
+// ══════════════════════════════════════════════════════════
+//  VARIABLE AUTOCOMPLETE
+// ══════════════════════════════════════════════════════════
+let acDropdown=null, acTarget=null, acItems=[], acIdx=-1;
+
+function createACDropdown(){
+  if(acDropdown) return acDropdown;
+  acDropdown=document.createElement('div');
+  acDropdown.className='var-autocomplete';
+  acDropdown.id='var-autocomplete';
+  document.body.appendChild(acDropdown);
+  return acDropdown;
+}
+
+function showVarAutocomplete(input){
+  const vars=getEnvVars();
+  const keys=Object.keys(vars);
+  if(!keys.length){ hideVarAutocomplete(); return; }
+  const cursorPos=input.selectionStart;
+  const textBefore=input.value.substring(0,cursorPos);
+  const match=textBefore.match(/\{\{(\w*)$/);
+  if(!match){ hideVarAutocomplete(); return; }
+  const partial=match[1].toLowerCase();
+  const filtered=keys.filter(k=>k.toLowerCase().startsWith(partial));
+  if(!filtered.length){ hideVarAutocomplete(); return; }
+  acTarget=input; acItems=filtered; acIdx=0;
+  const dd=createACDropdown();
+  dd.innerHTML=filtered.map((k,i)=>
+    `<div class="var-ac-item${i===0?' selected':''}" data-key="${escHtml(k)}" onmousedown="pickACVar('${escHtml(k)}',event)">
+      <span class="var-ac-key">{{${escHtml(k)}}}</span>
+      <span class="var-ac-val">${escHtml(String(vars[k]))}</span>
+    </div>`
+  ).join('');
+  // Position near cursor
+  const rect=input.getBoundingClientRect();
+  dd.style.left=rect.left+'px';
+  dd.style.top=(rect.bottom+4)+'px';
+  dd.style.minWidth=Math.min(rect.width,280)+'px';
+  dd.style.display='block';
+}
+
+function hideVarAutocomplete(){
+  if(acDropdown) acDropdown.style.display='none';
+  acTarget=null; acItems=[]; acIdx=-1;
+}
+
+function pickACVar(key,evt){
+  if(evt) evt.preventDefault();
+  if(!acTarget) return;
+  const cursorPos=acTarget.selectionStart;
+  const val=acTarget.value;
+  const before=val.substring(0,cursorPos);
+  const after=val.substring(cursorPos);
+  const match=before.match(/\{\{(\w*)$/);
+  if(!match) return;
+  const start=before.length-match[0].length;
+  const newVal=val.substring(0,start)+'{{'+key+'}}'+after;
+  acTarget.value=newVal;
+  const newPos=start+key.length+4;
+  acTarget.setSelectionRange(newPos,newPos);
+  acTarget.focus();
+  acTarget.dispatchEvent(new Event('input',{bubbles:true}));
+  hideVarAutocomplete();
+  highlightUrlVars();
+}
+
+function navAC(dir){
+  if(!acItems.length) return;
+  acIdx=Math.max(0,Math.min(acItems.length-1,acIdx+dir));
+  acDropdown.querySelectorAll('.var-ac-item').forEach((el,i)=>el.classList.toggle('selected',i===acIdx));
+  const sel=acDropdown.querySelector('.var-ac-item.selected');
+  if(sel) sel.scrollIntoView({block:'nearest'});
+}
+
+// Global listeners for autocomplete
+document.addEventListener('input',function(e){
+  const t=e.target;
+  if(t.tagName==='INPUT'&&(t.classList.contains('kv-input')||t.classList.contains('url-input')||t.closest('.auth-field'))){
+    showVarAutocomplete(t);
+  }
+  if(t.tagName==='TEXTAREA'&&t.id==='body-editor'){
+    showVarAutocomplete(t);
+  }
+},true);
+
+document.addEventListener('keydown',function(e){
+  if(!acDropdown||acDropdown.style.display==='none') return;
+  if(e.key==='ArrowDown'){ e.preventDefault(); navAC(1); }
+  else if(e.key==='ArrowUp'){ e.preventDefault(); navAC(-1); }
+  else if(e.key==='Enter'||e.key==='Tab'){
+    if(acItems.length&&acIdx>=0){ e.preventDefault(); pickACVar(acItems[acIdx]); }
+  }
+  else if(e.key==='Escape'){ hideVarAutocomplete(); }
+},true);
+
+document.addEventListener('click',function(e){
+  if(acDropdown&&!acDropdown.contains(e.target)) hideVarAutocomplete();
+},true);
+
+// ══════════════════════════════════════════════════════════
+//  JSON BEAUTIFY
+// ══════════════════════════════════════════════════════════
+function beautifyBody(){
+  const editor=document.getElementById('body-editor');
+  if(!editor) return;
+  const val=editor.value.trim();
+  if(!val){ toast('Body is empty','info'); return; }
+  try {
+    const parsed=JSON.parse(val);
+    editor.value=JSON.stringify(parsed,null,2);
+    markTabDirty();
+    toast('JSON beautified','success');
+  } catch(e){
+    toast('Invalid JSON: '+e.message,'error');
+  }
+}
+
+// ══════════════════════════════════════════════════════════
 //  SEND REQUEST
 // ══════════════════════════════════════════════════════════
 async function sendRequest(){
@@ -1476,7 +2579,10 @@ async function sendRequest(){
   if(!rawUrl){toast('Enter a URL first','error');return;}
   const url=substituteVars(rawUrl);
   const btn=document.getElementById('send-btn');
+  const cancelBtn=document.getElementById('cancel-btn');
   btn.innerHTML='<span class="spinner"></span>'; btn.disabled=true;
+  cancelBtn.style.display='block';
+  currentAbortController=new AbortController();
   const bodyType=S.bodyType;
   const authType=document.getElementById('auth-type').value;
   const authData=substituteAuthData(authType,getAuthData());
@@ -1496,44 +2602,95 @@ async function sendRequest(){
       });
       const bodyContent=JSON.stringify(Object.fromEntries(formRows.filter(r=>r.type==='text').map(r=>[r.key,r.value])));
       const payload={method:document.getElementById('method-select').value,url,params,headers,body_type:'form',body_content:bodyContent,auth_type:authType,auth_data:authData};
-      const res=await fetch('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const res=await fetch('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:currentAbortController.signal});
       result=await res.json();
     } else {
       let bodyContent='';
       if(['json','raw'].includes(bodyType)) bodyContent=substituteVars(document.getElementById('body-editor').value);
       else if(bodyType==='urlencoded'){ const kv=getFormRows(); const obj={}; kv.forEach(r=>{obj[substituteVars(r.key)]=substituteVars(r.value);}); bodyContent=JSON.stringify(obj); }
       const payload={method:document.getElementById('method-select').value,url,params,headers,body_type:bodyType,body_content:bodyContent,auth_type:authType,auth_data:authData};
-      const res=await fetch('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const res=await fetch('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:currentAbortController.signal});
       result=await res.json();
     }
     S.response=result; const t=currentTab(); if(t) t.response=result;
     renderResponse(result); loadHistory();
-  }catch(e){renderError(e.message);toast('Request failed: '+e.message,'error');}
-  finally{btn.innerHTML='Send';btn.disabled=false;}
+  }catch(e){
+    if(e.name==='AbortError'){toast('Request cancelled','info');}
+    else{renderError(e.message);toast('Request failed: '+e.message,'error');}
+  }finally{
+    btn.innerHTML='Send';btn.disabled=false;
+    cancelBtn.style.display='none';
+    currentAbortController=null;
+  }
+}
+
+function cancelRequest(){
+  if(currentAbortController){currentAbortController.abort();currentAbortController=null;}
 }
 
 function renderResponse(data){
   const empty=document.getElementById('resp-empty');
   const content=document.getElementById('resp-body-content');
+  const rawPre=document.getElementById('resp-body-raw');
+  const previewFrame=document.getElementById('resp-body-preview');
   const statusWrap=document.getElementById('resp-status-wrap');
+  const viewBar=document.getElementById('resp-view-bar');
   if(data.error){renderError(data.error);return;}
   const sc=data.status_code;
   const cls=sc>=500?'s-5xx':sc>=400?'s-4xx':sc>=300?'s-3xx':sc>=200?'s-2xx':'s-err';
   document.getElementById('resp-status-badge').className='status-badge '+cls;
   document.getElementById('resp-status-badge').textContent=`${sc} ${data.status_text||''}`;
   document.getElementById('resp-meta').innerHTML=`<span>Time: <span class="val">${data.duration_ms}ms</span></span><span>Size: <span class="val">${formatSize(data.size_bytes)}</span></span>${data.redirects>0?`<span>Redirects: <span class="val">${data.redirects}</span></span>`:''}`;
-  statusWrap.style.display='flex'; empty.style.display='none'; content.style.display='block';
-  if(data.body_json!==null&&data.body_json!==undefined) content.innerHTML=syntaxHighlight(JSON.stringify(data.body_json,null,2));
-  else content.textContent=data.body||'';
+  statusWrap.style.display='flex'; empty.style.display='none';
+  viewBar.style.display='flex';
+  // Store raw response for view toggling
+  S._respPrettyHtml = (data.body_json!==null&&data.body_json!==undefined) ? syntaxHighlight(JSON.stringify(data.body_json,null,2)) : null;
+  S._respRawText = data.body||'';
+  S._respIsHtml = (data.headers||{})['Content-Type']?.includes('text/html') || (data.headers||{})['content-type']?.includes('text/html');
+  // Default to Pretty view
+  setRespView('pretty');
   document.getElementById('resp-headers-tbody').innerHTML=Object.entries(data.headers||{}).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('');
   const cookies=data.cookies||{};
   document.getElementById('resp-cookies-tbody').innerHTML=Object.keys(cookies).length?Object.entries(cookies).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join(''):'<tr><td colspan="2" style="color:var(--txt3);font-size:12px;padding:12px">No cookies</td></tr>';
+}
+
+function setRespView(mode){
+  S._respViewMode=mode;
+  ['pretty','raw','preview'].forEach(v=>{
+    document.getElementById('rv-'+v).classList.toggle('active',v===mode);
+  });
+  const content=document.getElementById('resp-body-content');
+  const rawPre=document.getElementById('resp-body-raw');
+  const previewFrame=document.getElementById('resp-body-preview');
+  content.style.display='none'; rawPre.style.display='none'; previewFrame.style.display='none';
+  if(mode==='pretty'){
+    content.style.display='block';
+    if(S._respPrettyHtml) content.innerHTML=S._respPrettyHtml;
+    else content.textContent=S._respRawText||'';
+  } else if(mode==='raw'){
+    rawPre.style.display='block';
+    rawPre.textContent=S._respRawText||'';
+  } else if(mode==='preview'){
+    previewFrame.style.display='block';
+    const rawBody=S._respRawText||'';
+    if(S._respIsHtml){
+      previewFrame.srcdoc=rawBody;
+    } else if(S._respPrettyHtml){
+      previewFrame.srcdoc=`<html><body style="background:#1a1b26;color:#c0caf5;font-family:monospace;font-size:13px;padding:16px;margin:0"><pre>${S._respPrettyHtml}</pre></body></html>`;
+    } else {
+      previewFrame.srcdoc=`<html><body style="background:#1a1b26;color:#c0caf5;font-family:monospace;font-size:13px;padding:16px;margin:0"><pre>${escHtml(rawBody)}</pre></body></html>`;
+    }
+    previewFrame.style.height=(previewFrame.closest('.resp-body')?.clientHeight-10||300)+'px';
+  }
 }
 
 function renderError(msg){
   document.getElementById('resp-empty').style.display='none';
   const c=document.getElementById('resp-body-content');
   c.style.display='block'; c.innerHTML=`<span style="color:var(--red)">✕ ${esc(msg)}</span>`;
+  document.getElementById('resp-body-raw').style.display='none';
+  document.getElementById('resp-body-preview').style.display='none';
+  document.getElementById('resp-view-bar').style.display='none';
   document.getElementById('resp-status-badge').className='status-badge s-err';
   document.getElementById('resp-status-badge').textContent='Error';
   document.getElementById('resp-status-wrap').style.display='flex';
@@ -1598,69 +2755,67 @@ function renderCollectionNode(c){
   return `<div class="coll-group" id="coll-${c.id}">
     <div class="coll-header" onclick="toggleColl(${c.id})">
       <span class="coll-arrow" id="ca-${c.id}">▶</span>
-      <span class="coll-icon">📁</span>
+      <span class="coll-icon">${ICONS.folder}</span>
       <span class="coll-name" title="${esc(c.name)}">${esc(c.name)}</span>
       <span class="coll-count">${totalCount}</span>
       <span class="coll-actions" onclick="event.stopPropagation()">
-        <button class="coll-act-btn accent-btn" title="New Request" onclick="quickAddReq(${c.id},null)">📄+</button>
-        <button class="coll-act-btn accent-btn" title="New Folder"  onclick="openNewFolderModal(${c.id},null)">📁+</button>
-        <button class="coll-act-btn" title="Export"  onclick="exportCollection(${c.id},'${esc(c.name)}')">⬇</button>
-        <button class="coll-act-btn" title="Rename"  onclick="openRenameCollModal(${c.id},'${esc(c.name)}')">✎</button>
-        <button class="coll-act-btn danger" title="Delete" onclick="deleteCollection(${c.id})">🗑</button>
+        <button class="coll-act-btn accent-btn" title="New Request" onclick="quickAddReq(${c.id},null)">${ICONS.filePlus}</button>
+        <button class="coll-act-btn accent-btn" title="New Folder"  onclick="openNewFolderModal(${c.id},null)">${ICONS.folderPlus}</button>
+        <button class="coll-act-btn" title="Export"  onclick="exportCollection(${c.id},'${esc(c.name)}')">${ICONS.download}</button>
+        <button class="coll-act-btn" title="Rename"  onclick="openRenameCollModal(${c.id},'${esc(c.name)}')">${ICONS.edit}</button>
+        <button class="coll-act-btn danger" title="Delete" onclick="deleteCollection(${c.id})">${ICONS.trash}</button>
       </span>
     </div>
     <div class="req-list" id="rl-${c.id}">
       ${allNodes.length
-        ? allNodes.map(node=>renderTreeNode(node,0,c.id)).join('')
+        ? allNodes.map(node=>renderTreeNode(node,c.id)).join('')
         : '<div class="tree-empty">Empty collection</div>'}
     </div>
   </div>`;
 }
 
-function renderTreeNode(item,depth,collId){
+function renderTreeNode(item,collId){
   return item._type==='folder'
-    ? renderFolderNode(item,depth,collId)
-    : renderRequestNode(item,depth);
+    ? renderFolderNode(item,collId)
+    : renderRequestNode(item);
 }
 
-function renderFolderNode(f,depth,collId){
-  const ind=depth*12;
+function renderFolderNode(f,collId){
   const allChildren=[
     ...(f.folders||[]).map(sf=>({...sf,_type:'folder'})),
     ...(f.requests||[]).map(r=>({...r,_type:'request'}))
   ];
   const childCount=(f.folders||[]).length+(f.requests||[]).length;
   return `<div class="folder-node" id="fn-${f.id}">
-    <div class="folder-hdr" style="padding-left:${6+ind}px" onclick="toggleFolder(${f.id})">
+    <div class="folder-hdr" onclick="toggleFolder(${f.id})">
       <span class="f-arrow" id="farr-${f.id}">▶</span>
-      <span class="folder-ic" id="fic-${f.id}">📁</span>
+      <span class="folder-ic" id="fic-${f.id}" style="display:inline-flex">${ICONS.folder}</span>
       <span class="folder-nm" title="${esc(f.name)}">${esc(f.name)}</span>
       <span class="fold-count">${childCount}</span>
       <span class="fold-acts" onclick="event.stopPropagation()">
-        <button class="coll-act-btn accent-btn" title="New Request"   onclick="quickAddReq(${collId},${f.id})">📄+</button>
-        <button class="coll-act-btn accent-btn" title="New Subfolder" onclick="openNewFolderModal(${collId},${f.id})">📁+</button>
-        <button class="coll-act-btn dup"    title="Duplicate" onclick="duplicateFolder(${f.id})">⊕</button>
-        <button class="coll-act-btn"        title="Rename"    onclick="openRenameFolderModal(${f.id},'${esc(f.name)}')">✎</button>
-        <button class="coll-act-btn danger" title="Delete"    onclick="deleteFolder(${f.id})">🗑</button>
+        <button class="coll-act-btn accent-btn" title="New Request"   onclick="quickAddReq(${collId},${f.id})">${ICONS.filePlus}</button>
+        <button class="coll-act-btn accent-btn" title="New Subfolder" onclick="openNewFolderModal(${collId},${f.id})">${ICONS.folderPlus}</button>
+        <button class="coll-act-btn dup"    title="Duplicate" onclick="duplicateFolder(${f.id})">${ICONS.copy}</button>
+        <button class="coll-act-btn"        title="Rename"    onclick="openRenameFolderModal(${f.id},'${esc(f.name)}')">${ICONS.edit}</button>
+        <button class="coll-act-btn danger" title="Delete"    onclick="deleteFolder(${f.id})">${ICONS.trash}</button>
       </span>
     </div>
     <div class="folder-children" id="fch-${f.id}">
       ${allChildren.length
-        ? allChildren.map(ch=>renderTreeNode(ch,depth+1,collId)).join('')
-        : '<div class="tree-empty" style="padding-left:'+(8+(depth+1)*12)+'px">Empty folder</div>'}
+        ? allChildren.map(ch=>renderTreeNode(ch,collId)).join('')
+        : '<div class="tree-empty">Empty folder</div>'}
     </div>
   </div>`;
 }
 
-function renderRequestNode(r,depth){
-  const ind=depth*12;
-  return `<div class="req-item" id="ri-${r.id}" style="padding-left:${8+ind}px" onclick="loadRequestInTab(${r.id})">
+function renderRequestNode(r){
+  return `<div class="req-item" id="ri-${r.id}" onclick="loadRequestInTab(${r.id})">
     <span class="req-method m-${r.method}">${r.method}</span>
     <span class="req-name-text" title="${esc(r.name)}">${esc(r.name)}</span>
     <span class="req-item-actions">
-      <button class="req-act-btn dup"    title="Duplicate" onclick="event.stopPropagation();duplicateRequest(${r.id})">⊕</button>
-      <button class="req-act-btn"        title="Rename"    onclick="event.stopPropagation();openRenameReqModalById(${r.id},'${esc(r.name)}')">✎</button>
-      <button class="req-act-btn danger" title="Delete"    onclick="event.stopPropagation();deleteReq(${r.id})">✕</button>
+      <button class="req-act-btn dup"    title="Duplicate" onclick="event.stopPropagation();duplicateRequest(${r.id})">${ICONS.copy}</button>
+      <button class="req-act-btn"        title="Rename"    onclick="event.stopPropagation();openRenameReqModalById(${r.id},'${esc(r.name)}')">${ICONS.edit}</button>
+      <button class="req-act-btn danger" title="Delete"    onclick="event.stopPropagation();deleteReq(${r.id})">${ICONS.trash}</button>
     </span>
   </div>`;
 }
@@ -1680,7 +2835,7 @@ function toggleFolder(id){
   if(!fc) return;
   const open=fc.classList.toggle('open');
   arrow.classList.toggle('open',open);
-  if(icon) icon.textContent=open?'📂':'📁';
+  if(icon) icon.innerHTML=open?ICONS.folderOpen:ICONS.folder;
 }
 
 // ── Expand helpers (used after create to reveal new items) ──
@@ -1693,7 +2848,7 @@ function ensureFolderOpen(folderId){
   const fc=document.getElementById('fch-'+folderId);
   const arrow=document.getElementById('farr-'+folderId);
   const icon=document.getElementById('fic-'+folderId);
-  if(fc&&!fc.classList.contains('open')){ fc.classList.add('open'); if(arrow) arrow.classList.add('open'); if(icon) icon.textContent='📂'; }
+  if(fc&&!fc.classList.contains('open')){ fc.classList.add('open'); if(arrow) arrow.classList.add('open'); if(icon) icon.innerHTML=ICONS.folderOpen; }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1708,14 +2863,18 @@ function openNewFolderModal(collId, parentFolderId){
 
 async function confirmNewFolder(){
   const name=document.getElementById('folder-name-input').value.trim()||'New Folder';
-  const res=await fetch('/api/folders',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({collection_id:S.newFolderCollId,parent_folder_id:S.newFolderParentId,name})});
-  const data=await res.json();
-  closeModal('folder-modal');
-  await loadCollections();
-  ensureCollOpen(S.newFolderCollId);
-  if(S.newFolderParentId) ensureFolderOpen(S.newFolderParentId);
-  toast(`Folder "${name}" created`,'success');
+  if(!S.newFolderCollId){toast('No collection selected','error');return;}
+  try{
+    const res=await fetch('/api/folders',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({collection_id:S.newFolderCollId,parent_folder_id:S.newFolderParentId,name})});
+    const data=await res.json();
+    if(!res.ok||data.error){toast(data.error||'Failed to create folder','error');return;}
+    closeModal('folder-modal');
+    await loadCollections();
+    ensureCollOpen(S.newFolderCollId);
+    if(S.newFolderParentId) ensureFolderOpen(S.newFolderParentId);
+    toast(`Folder "${name}" created`,'success');
+  }catch(e){toast('Error: '+e.message,'error');}
 }
 
 function openRenameFolderModal(id,name){
@@ -1983,6 +3142,7 @@ async function performSave(name,collId,folderId){
   }
 }
 
+function openModal(id){ document.getElementById(id).classList.add('open'); }
 function closeModal(id){ document.getElementById(id).classList.remove('open'); }
 
 // ══════════════════════════════════════════════════════════
@@ -2115,13 +3275,67 @@ document.querySelectorAll('.modal-overlay').forEach(o=>o.addEventListener('click
 </body>
 </html>"""
 
+ERROR_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{CODE}} - RequestLab</title>
+<link rel="icon" type="image/png" href="/media/logo.png">
+<style>
+  :root { --bg: #080c10; --acc: #00d4ff; --acc-glow: rgba(0, 212, 255, 0.4); --txt: #cdd9e5; }
+  body { margin: 0; background: var(--bg); color: var(--txt); font-family: 'Segoe UI', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
+  .blob { position: absolute; border-radius: 50%; filter: blur(80px); z-index: 0; opacity: 0.4; animation: float 10s infinite alternate ease-in-out; }
+  .blob.one { top: -10%; left: -10%; width: 400px; height: 400px; background: #00d4ff; }
+  .blob.two { bottom: -10%; right: -10%; width: 400px; height: 400px; background: #d2a8ff; animation-delay: -5s; }
+  @keyframes float { from { transform: translate(0,0); } to { transform: translate(40px, 60px); } }
+  .card { position: relative; z-index: 10; background: rgba(13,17,23,0.7); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.1); border-radius: 24px; padding: 60px; text-align: center; box-shadow: 0 40px 100px rgba(0,0,0,0.5); max-width: 440px; width: 90%; }
+  .code { font-size: 120px; font-weight: 800; margin: 0; line-height: 1; background: linear-gradient(135deg, var(--acc), #d2a8ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(0 0 15px var(--acc-glow)); animation: glitch 3s infinite; }
+  @keyframes glitch { 0% { opacity: 1; } 95% { opacity: 1; transform: none; } 96% { opacity: 0.8; transform: skewX(-5deg); } 97% { opacity: 1; transform: skewX(5deg); } 98% { opacity: 0.9; transform: none; } 100% { opacity: 1; } }
+  h1 { font-size: 28px; margin: 24px 0 12px; color: #fff; font-weight: 700; letter-spacing: -0.5px; }
+  p { font-size: 16px; color: #8b9eb5; margin-bottom: 36px; line-height: 1.6; }
+  .btn { display: inline-block; padding: 14px 36px; background: var(--acc); color: #000; text-decoration: none; font-weight: 700; border-radius: 30px; transition: all 0.2s; box-shadow: 0 4px 20px var(--acc-glow); }
+  .btn:hover { transform: translateY(-2px); box-shadow: 0 8px 30px var(--acc-glow); background: #79c0ff; }
+  .logo { width: 56px; height: 56px; margin-bottom: 24px; filter: drop-shadow(0 0 12px var(--acc-glow)); }
+</style>
+</head>
+<body>
+  <div class="blob one"></div><div class="blob two"></div>
+  <div class="card">
+    <div class="code">{{CODE}}</div>
+    <h1>{{TITLE}}</h1>
+    <p>{{MSG}}</p>
+    <a href="/" class="btn">Back to Earth</a>
+  </div>
+</body>
+</html>"""
+
 @app.route("/")
 def index():
+    if get_current_user_id():
+        return redirect("/app")
+    return Response(LANDING_HTML, mimetype="text/html")
+
+@app.errorhandler(404)
+def page_not_found(e):
+    return render_error(404, "Lost in Space", "The page you're looking for has drifted into a black hole.")
+
+@app.errorhandler(403)
+def access_forbidden(e):
+    return render_error(403, "Access Denied", "You don't have the clearance to enter this sector.")
+
+def render_error(code, title, msg):
+    html = ERROR_HTML.replace("{{CODE}}", str(code)).replace("{{TITLE}}", title).replace("{{MSG}}", msg)
+    return Response(html, mimetype="text/html"), code
+
+@app.route("/app")
+def app_ui():
     return Response(HTML, mimetype="text/html")
 
 if __name__ == "__main__":
     print("\n+--------------------------------------+")
     print("|     RequestLab is running!            |")
-    print("|  Open: http://localhost:5000         |")
+    print("|  Landing Page: http://localhost:5000 |")
+    print("|  App UI: http://localhost:5000/app   |")
     print("+--------------------------------------+\n")
     app.run(debug=True, port=5000)
