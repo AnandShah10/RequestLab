@@ -372,7 +372,13 @@ def auth_logout():
 
 @app.route("/api/execute", methods=["POST"])
 def execute_request():
-    data = request.json or {}
+    if request.is_json:
+        data = request.json or {}
+    else:
+        try:
+            data = json.loads(request.form.get("payload", "{}"))
+        except:
+            data = {}
     method      = data.get("method", "GET").upper()
     url         = data.get("url", "").strip()
     params_list = data.get("params", [])
@@ -417,11 +423,18 @@ def execute_request():
         if body_type == "urlencoded":
             headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
 
+    req_files = None
+    if not request.is_json and request.files:
+        req_files = {}
+        for k, v in request.files.items():
+            if k.startswith("file_"):
+                req_files[k[5:]] = (v.filename, v.stream.read(), v.mimetype)
+
     start = time.time()
     try:
         resp = requests.request(
             method=method, url=url, params=params, headers=headers,
-            json=req_json, data=form_data or req_body,
+            json=req_json, data=form_data or req_body, files=req_files,
             auth=auth, timeout=timeout, allow_redirects=True, verify=True,
         )
         duration_ms = (time.time() - start) * 1000
@@ -810,6 +823,23 @@ def update_request(rid):
         )
     return jsonify({"ok": True})
 
+@app.route("/api/requests/<int:rid>/move", methods=["PUT"])
+def move_request(rid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    data = request.json or {}
+    new_collection_id = data.get("collection_id")
+    new_folder_id = data.get("folder_id")
+    with get_db() as conn:
+        r = conn.execute("SELECT c.user_id FROM requests r JOIN collections c ON r.collection_id = c.id WHERE r.id=?", (rid,)).fetchone()
+        if not r or r["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
+        
+        c = conn.execute("SELECT user_id FROM collections WHERE id=?", (new_collection_id,)).fetchone()
+        if not c or c["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
+
+        conn.execute("UPDATE requests SET collection_id=?, folder_id=? WHERE id=?", (new_collection_id, new_folder_id, rid))
+    return jsonify({"ok": True})
+
 @app.route("/api/requests/<int:rid>/rename", methods=["PUT"])
 def rename_request(rid):
     uid = require_auth()
@@ -1125,6 +1155,12 @@ HTML = r"""<!DOCTYPE html>
   --mono:'IBM Plex Mono',monospace;--sans:'Space Grotesk',sans-serif;
   --radius:5px;--radius-lg:8px;--radius-xl:12px;
   --shadow:0 4px 24px rgba(0,0,0,.4);--glow:0 0 20px var(--acc-glow);
+}
+[data-theme="light"] {
+  --bg0:#f0f2f5;--bg1:#ffffff;--bg2:#f8f9fa;--bg3:#e1e4e8;--bg4:#d1d5da;
+  --border:#e1e4e8;--border2:#d1d5da;--border3:#c6cbd1;
+  --txt:#24292e;--txt2:#586069;--txt3:#6a737d;
+  --shadow:0 4px 24px rgba(0,0,0,.1);
 }
 html,body{height:100%;overflow:hidden;background:var(--bg0);color:var(--txt);font-family:var(--sans)}
 body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:0;opacity:.4}
@@ -1451,12 +1487,18 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .auth-form input{width:100%;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;font-size:13px;color:var(--txt);font-family:var(--mono);outline:none;transition:border-color .15s;box-sizing:border-box}
 .auth-form input:focus{border-color:var(--acc)}
 .auth-form input::placeholder{color:var(--txt3)}
+.pw-wrap{position:relative;display:flex;width:100%}
+.pw-wrap input{padding-right:36px;width:100%}
+.pw-toggle{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--txt3);cursor:pointer;font-size:14px;padding:4px;display:flex;align-items:center;justify-content:center;transition:color .15s}
+.pw-toggle:hover{color:var(--acc)}
 .auth-submit{background:var(--acc);border:none;border-radius:var(--radius);padding:10px;font-size:13px;font-weight:700;color:#000;cursor:pointer;font-family:var(--sans);transition:all .15s;letter-spacing:.3px}
 .auth-submit:hover{background:var(--acc2);box-shadow:0 0 16px var(--acc-glow)}
 .auth-submit:disabled{opacity:.5;cursor:wait}
 .auth-error{color:var(--red);font-size:11px;font-family:var(--mono);text-align:center;min-height:16px}
 .auth-skip{display:block;text-align:center;margin-top:14px;font-size:11px;color:var(--txt3);cursor:pointer;font-family:var(--mono);transition:color .15s;background:none;border:none;width:100%}
 .auth-skip:hover{color:var(--acc)}
+.coll-header.drag-over, .folder-hdr.drag-over { background: rgba(0, 212, 255, 0.15); border-radius: 4px; }
+.req-item.dragging { opacity: 0.5; }
 </style>
 </head>
 <body>
@@ -1476,7 +1518,10 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
     <!-- Login form -->
     <form class="auth-form" id="login-form" onsubmit="doLogin(event)">
       <input id="login-field" type="text" placeholder="Username or Email" autocomplete="username" required>
-      <input id="login-pw" type="password" placeholder="Password" autocomplete="current-password" required>
+      <div class="pw-wrap">
+        <input id="login-pw" type="password" placeholder="Password" autocomplete="current-password" required>
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" tabindex="-1" title="Show password"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
+      </div>
       <button type="submit" class="auth-submit" id="login-btn">Sign In</button>
       <a href="#" onclick="authTab('forgot'); return false;" style="font-size:11px;color:var(--txt3);text-align:right;margin-top:-6px;text-decoration:none;">Forgot password?</a>
     </form>
@@ -1491,7 +1536,10 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
     <form class="auth-form" id="reset-form" style="display:none" onsubmit="doResetPassword(event)">
       <div style="font-size:12px;color:var(--txt2);text-align:center;margin-bottom:12px">Set a new password.</div>
       <input id="reset-token" type="hidden">
-      <input id="reset-pw" type="password" placeholder="New Password" required minlength="4">
+      <div class="pw-wrap">
+        <input id="reset-pw" type="password" placeholder="New Password" required minlength="4">
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" tabindex="-1" title="Show password"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
+      </div>
       <button type="submit" class="auth-submit" id="reset-btn">Save New Password</button>
       <a href="#" onclick="authTab('login'); return false;" style="font-size:11px;color:var(--txt3);text-align:center;text-decoration:none;margin-top:6px;">← Back to Sign In</a>
     </form>
@@ -1499,7 +1547,10 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
     <form class="auth-form" id="register-form" style="display:none" onsubmit="doRegister(event)">
       <input id="reg-username" type="text" placeholder="Username" autocomplete="username" required>
       <input id="reg-email" type="email" placeholder="Email" autocomplete="email" required>
-      <input id="reg-pw" type="password" placeholder="Password (min 4 chars)" autocomplete="new-password" required minlength="4">
+      <div class="pw-wrap">
+        <input id="reg-pw" type="password" placeholder="Password (min 4 chars)" autocomplete="new-password" required minlength="4">
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" tabindex="-1" title="Show password"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
+      </div>
       <button type="submit" class="auth-submit" id="reg-btn">Create Account</button>
     </form>
     <button class="auth-skip" onclick="skipAuth()">Continue without account →</button>
@@ -1519,6 +1570,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
       <button class="top-tab" onclick="switchView('environments')">Environments</button>
     </div>
     <div class="top-right">
+      <button class="icon-btn" onclick="toggleTheme()" title="Toggle Theme" id="theme-btn" style="border:none;font-size:16px;">☀️</button>
       <select id="env-selector" class="env-select" onchange="selectEnv(this.value)">
         <option value="">No Environment</option>
       </select>
@@ -1630,7 +1682,10 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
               <button class="beautify-btn" id="beautify-btn" style="display:none" onclick="beautifyBody()">✨ Beautify</button>
             </div>
             <div id="body-none-msg" style="color:var(--txt3);font-size:12px;font-family:var(--mono);padding:8px 0">This request does not have a body.</div>
-            <textarea class="code-editor" id="body-editor" style="display:none" placeholder="Enter request body…" spellcheck="false" oninput="markTabDirty()"></textarea>
+            <div id="body-editor-wrap" style="display:none; position:relative; width:100%;">
+              <textarea class="code-editor" id="body-editor" style="position:relative; z-index:1; background:transparent; color:transparent; caret-color:var(--txt); white-space:pre;" placeholder="Enter request body…" spellcheck="false" oninput="markTabDirty(); updateBodyHighlight()" onscroll="document.getElementById('body-highlight-layer').scrollTop = this.scrollTop; document.getElementById('body-highlight-layer').scrollLeft = this.scrollLeft;" onkeydown="handleBodyKeydown(event)"></textarea>
+              <pre id="body-highlight-layer" class="code-editor" style="position:absolute; top:0; left:0; right:0; bottom:0; z-index:0; margin:0; pointer-events:none; white-space:pre; overflow:hidden; border-color:transparent; background:var(--bg2);"></pre>
+            </div>
             <div id="body-kv-wrap" style="display:none">
               <div class="kv-wrap"><table class="kv-table">
                 <thead><tr><th style="width:28px"></th><th>Type</th><th>Key</th><th>Value / File</th><th style="width:36px"></th></tr></thead>
@@ -1875,7 +1930,9 @@ const ICONS = {
   trash: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`,
   cross: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`,
   folder: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`,
-  folderOpen: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><polyline points="10 13 14 13 14 17"></polyline></svg>`
+  folderOpen: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><polyline points="10 13 14 13 14 17"></polyline></svg>`,
+  eye: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`,
+  eyeOff: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`
 };
 
 // ══════════════════════════════════════════════════════════
@@ -1922,6 +1979,7 @@ function restoreTab(t){
   else addKVRow('headers');
   S.bodyType=t.bodyType; setBodyType(t.bodyType);
   document.getElementById('body-editor').value=t.bodyContent||'';
+  if(typeof updateBodyHighlight === 'function') updateBodyHighlight();
   document.getElementById('body-kv-body').innerHTML='';
   if(t.bodyKV&&t.bodyKV.length) t.bodyKV.forEach(r=>addFormRow(r.type||'text',r.key,r.value,r.fileName));
   document.getElementById('auth-type').value=t.authType;
@@ -1948,6 +2006,12 @@ function renderTabBar(){
     pill.addEventListener('click',e=>{ if(e.target.classList.contains('req-tab-close')) return; switchTab(i); });
     bar.insertBefore(pill,nb);
   });
+  saveWorkspace();
+}
+
+function saveWorkspace() {
+  const safeTabs = tabs.map(t => ({...t, response: null}));
+  localStorage.setItem('requestlab_workspace', JSON.stringify({tabs: safeTabs, activeTabIdx}));
 }
 
 function methodColor(m){ return {GET:'#3dd68c',POST:'#f0883e',PUT:'#79c0ff',PATCH:'#d2a8ff',DELETE:'#f47067',HEAD:'#e3b341',OPTIONS:'#00d4ff'}[m]||'#cdd9e5'; }
@@ -1972,8 +2036,19 @@ function closeTab(e,idx){
 function markTabDirty(){ const t=currentTab(); if(t&&!t.dirty){t.dirty=true;renderTabBar();} }
 
 // ══════════════════════════════════════════════════════════
-//  GLOBAL STATE
+//  GLOBAL STATE & THEME
 // ══════════════════════════════════════════════════════════
+function toggleTheme() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  document.documentElement.setAttribute('data-theme', isLight ? 'dark' : 'light');
+  document.getElementById('theme-btn').textContent = isLight ? '☀️' : '🌙';
+  localStorage.setItem('requestlab_theme', isLight ? 'dark' : 'light');
+}
+
+if(localStorage.getItem('requestlab_theme') === 'light') {
+  document.documentElement.setAttribute('data-theme', 'light');
+}
+
 const S = {
   bodyType:'none', authType:'none', authData:{}, response:null,
   collections:[], history:[], environments:[],
@@ -1986,6 +2061,19 @@ const S = {
 // ══════════════════════════════════════════════════════════
 //  AUTH UI
 // ══════════════════════════════════════════════════════════
+function togglePw(btn) {
+  const inp = btn.previousElementSibling;
+  if (inp.type === 'password') {
+    inp.type = 'text';
+    btn.innerHTML = ICONS.eyeOff;
+    btn.title = 'Hide password';
+  } else {
+    inp.type = 'password';
+    btn.innerHTML = ICONS.eye;
+    btn.title = 'Show password';
+  }
+}
+
 function authTab(tab){
   document.getElementById('at-login').classList.toggle('active',tab==='login'||tab==='reset'||tab==='forgot');
   document.getElementById('at-register').classList.toggle('active',tab==='register');
@@ -2164,9 +2252,21 @@ window.addEventListener('beforeunload',function(e){
 //  INIT
 // ══════════════════════════════════════════════════════════
 document.addEventListener('DOMContentLoaded', async ()=>{
-  tabs.push(makeTabState()); activeTabIdx=0; renderTabBar();
-  addKVRow('params'); addKVRow('headers');
-  setupResizeHandle(); renderAuthFields(); updateMethodColor();
+  if(localStorage.getItem('requestlab_theme') === 'light') document.getElementById('theme-btn').textContent = '🌙';
+  try {
+    const ws = JSON.parse(localStorage.getItem('requestlab_workspace'));
+    if(ws && ws.tabs && ws.tabs.length) {
+      tabs = ws.tabs.map(t => makeTabState(t));
+      activeTabIdx = ws.activeTabIdx || 0;
+      if (activeTabIdx >= tabs.length) activeTabIdx = 0;
+    } else {
+      tabs = [makeTabState()]; activeTabIdx=0;
+    }
+  } catch(e) {
+    tabs = [makeTabState()]; activeTabIdx=0;
+  }
+  renderTabBar(); restoreTab(tabs[activeTabIdx]);
+  setupResizeHandle(); updateMethodColor();
   // Check auth
   try {
     const res=await fetch('/api/auth/me');
@@ -2307,7 +2407,7 @@ function getFormRows(){
     const typeEl=tr.querySelector('.form-type-select');
     const keyEl=tr.querySelectorAll('input:not([type=checkbox]):not([type=file])')[0];
     const type=typeEl?.value||'text'; const key=keyEl?.value||'';
-    if(type==='file'){ const file=formFileMap.get(tr)||null; const ns=tr.querySelector('.file-name-txt'); return {type:'file',key,value:'',fileName:file?file.name:(ns?.textContent||'')}; }
+    if(type==='file'){ const file=formFileMap.get(tr)||null; const ns=tr.querySelector('.file-name-txt'); return {type:'file',key,value:'',fileName:file?file.name:(ns?.textContent||''),fileObj:file}; }
     const valEl=tr.querySelector('td:nth-child(4) input.kv-input');
     return {type:'text',key,value:valEl?.value||''};
   }).filter(r=>r.key.trim());
@@ -2320,10 +2420,14 @@ function setBodyType(type){
   S.bodyType=type;
   document.querySelectorAll('.body-type-btn').forEach(b=>b.classList.toggle('active',b.textContent.trim()===type));
   document.getElementById('body-none-msg').style.display=type==='none'?'block':'none';
-  document.getElementById('body-editor').style.display=['json','raw'].includes(type)?'block':'none';
+  const ew = document.getElementById('body-editor-wrap');
+  if(ew) ew.style.display=['json','raw'].includes(type)?'block':'none';
   document.getElementById('beautify-btn').style.display=type==='json'?'':'none';
   document.getElementById('body-kv-wrap').style.display=['form','urlencoded'].includes(type)?'block':'none';
-  if(type==='json'&&!document.getElementById('body-editor').value.trim()) document.getElementById('body-editor').value='{\n  \n}';
+  if(type==='json'&&!document.getElementById('body-editor').value.trim()){
+    document.getElementById('body-editor').value='{\n  \n}';
+    if(typeof updateBodyHighlight === 'function') updateBodyHighlight();
+  }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2333,10 +2437,14 @@ function renderAuthFields(){
   const t=document.getElementById('auth-type').value; S.authType=t;
   const c=document.getElementById('auth-fields'); c.innerHTML='';
   if(t==='basic') c.innerHTML=af('Username','auth-username',S.authData.username||'')+af('Password','auth-password',S.authData.password||'','password');
-  else if(t==='bearer') c.innerHTML=af('Token','auth-token',S.authData.token||'');
-  else if(t==='apikey') c.innerHTML=af('Key Name','auth-key',S.authData.key||'X-API-Key')+af('Key Value','auth-value',S.authData.value||'')+`<div class="auth-field"><label>Add to</label><select class="auth-type-select" id="auth-location" style="margin-bottom:0"><option value="header" ${S.authData.location==='header'?'selected':''}>Header</option><option value="query" ${S.authData.location==='query'?'selected':''}>Query Param</option></select></div>`;
+  else if(t==='bearer') c.innerHTML=af('Token','auth-token',S.authData.token||'','password');
+  else if(t==='apikey') c.innerHTML=af('Key Name','auth-key',S.authData.key||'X-API-Key')+af('Key Value','auth-value',S.authData.value||'','password')+`<div class="auth-field"><label>Add to</label><select class="auth-type-select" id="auth-location" style="margin-bottom:0"><option value="header" ${S.authData.location==='header'?'selected':''}>Header</option><option value="query" ${S.authData.location==='query'?'selected':''}>Query Param</option></select></div>`;
 }
-function af(label,id,val='',type='text'){ return `<div class="auth-field"><label>${label}</label><input id="${id}" type="${type}" value="${esc(val)}" placeholder="${label}" oninput="markTabDirty()"></div>`; }
+function af(label,id,val='',type='text'){ 
+  let inp = `<input id="${id}" type="${type}" value="${esc(val)}" placeholder="${label}" oninput="markTabDirty()">`;
+  if(type==='password') inp = `<div class="pw-wrap">${inp}<button type="button" class="pw-toggle" onclick="togglePw(this)" tabindex="-1" title="Show password">${ICONS.eye}</button></div>`;
+  return `<div class="auth-field"><label>${label}</label>${inp}</div>`; 
+}
 function getAuthData(){
   const t=document.getElementById('auth-type').value;
   if(t==='basic') return {username:gv('auth-username'),password:gv('auth-password')};
@@ -2565,6 +2673,7 @@ function beautifyBody(){
     const parsed=JSON.parse(val);
     editor.value=JSON.stringify(parsed,null,2);
     markTabDirty();
+    if(typeof updateBodyHighlight === 'function') updateBodyHighlight();
     toast('JSON beautified','success');
   } catch(e){
     toast('Invalid JSON: '+e.message,'error');
@@ -2591,18 +2700,17 @@ async function sendRequest(){
   try{
     let result;
     if(bodyType==='form'){
-      const formRows=[]; const rows=[...document.querySelectorAll('#body-kv-body tr')];
-      rows.forEach(tr=>{
-        const typeEl=tr.querySelector('.form-type-select');
-        const keyEl=tr.querySelectorAll('input:not([type=checkbox]):not([type=file])')[0];
-        const ftype=typeEl?.value||'text'; const key=substituteVars(keyEl?.value||'');
-        if(!key) return;
-        if(ftype==='file'){ const file=formFileMap.get(tr); if(file) formRows.push({type:'file',key,fileName:file.name}); }
-        else { const valEl=tr.querySelector('td:nth-child(4) input.kv-input'); formRows.push({type:'text',key,value:substituteVars(valEl?.value||'')}); }
+      const formRows=getFormRows();
+      const payload={method:document.getElementById('method-select').value,url,params,headers,body_type:'form',body_content:'{}',auth_type:authType,auth_data:authData};
+      const fd = new FormData();
+      const textFields = {};
+      formRows.forEach(r => {
+        if(r.type==='text') textFields[r.key] = substituteVars(r.value);
+        else if(r.type==='file' && r.fileObj) fd.append('file_'+substituteVars(r.key), r.fileObj, r.fileObj.name);
       });
-      const bodyContent=JSON.stringify(Object.fromEntries(formRows.filter(r=>r.type==='text').map(r=>[r.key,r.value])));
-      const payload={method:document.getElementById('method-select').value,url,params,headers,body_type:'form',body_content:bodyContent,auth_type:authType,auth_data:authData};
-      const res=await fetch('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:currentAbortController.signal});
+      payload.body_content = JSON.stringify(textFields);
+      fd.append('payload', JSON.stringify(payload));
+      const res=await fetch('/api/execute',{method:'POST',body:fd,signal:currentAbortController.signal});
       result=await res.json();
     } else {
       let bodyContent='';
@@ -2708,6 +2816,109 @@ function syntaxHighlight(json){
     });
 }
 
+function updateBodyHighlight() {
+  const editor = document.getElementById('body-editor');
+  const layer = document.getElementById('body-highlight-layer');
+  if(!editor || !layer) return;
+  if(S.bodyType === 'json') {
+    layer.innerHTML = syntaxHighlight(editor.value) + '<br>';
+  } else {
+    layer.textContent = editor.value + '\n';
+  }
+}
+
+function handleBodyKeydown(e) {
+  if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    const start = e.target.selectionStart;
+    const end = e.target.selectionEnd;
+    e.target.value = e.target.value.substring(0, start) + "  " + e.target.value.substring(end);
+    e.target.selectionStart = e.target.selectionEnd = start + 2;
+    markTabDirty();
+    updateBodyHighlight();
+  }
+  // Ctrl+/ — toggle line comment(s) on one or multiple selected lines
+  if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+    e.preventDefault();
+    const ta = e.target;
+    const val = ta.value;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const lineStart = val.lastIndexOf('\n', start - 1) + 1;
+    let lineEnd = val.indexOf('\n', end);
+    if (lineEnd === -1) lineEnd = val.length;
+    const lines = val.slice(lineStart, lineEnd).split('\n');
+    // If every non-empty line is already commented, uncomment; else comment all
+    const allCommented = lines.every(l => l.trimStart() === '' || l.trimStart().startsWith('//'));
+    const toggled = lines.map(l => {
+      if (l.trimStart() === '') return l;
+      if (allCommented) return l.replace(/^(\s*)\/\/ ?/, '$1');
+      else return l.replace(/^(\s*)/, '$1// ');
+    }).join('\n');
+    ta.value = val.slice(0, lineStart) + toggled + val.slice(lineEnd);
+    ta.selectionStart = lineStart;
+    ta.selectionEnd = lineStart + toggled.length;
+    markTabDirty();
+    updateBodyHighlight();
+  }
+}
+
+document.addEventListener('keydown', function(e) {
+  const tag = document.activeElement?.tagName;
+  const inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+  if (e.ctrlKey || e.metaKey) {
+    // Ctrl+S — Save
+    if (e.key === 's' || e.key === 'S') {
+      e.preventDefault();
+      handleSave();
+    }
+    // Ctrl+Enter — Send request
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      sendRequest();
+    }
+    // Ctrl+T — New tab
+    else if (e.key === 't' || e.key === 'T') {
+      e.preventDefault();
+      newTab();
+    }
+    // Ctrl+W — Close current tab
+    else if (e.key === 'w' || e.key === 'W') {
+      e.preventDefault();
+      if (activeTabIdx >= 0) closeTabSafe({ stopPropagation: () => {} }, activeTabIdx);
+    }
+    // Ctrl+Tab / Ctrl+Shift+Tab — Cycle tabs
+    else if (e.key === 'Tab') {
+      e.preventDefault();
+      if (!tabs.length) return;
+      const next = e.shiftKey
+        ? (activeTabIdx - 1 + tabs.length) % tabs.length
+        : (activeTabIdx + 1) % tabs.length;
+      switchTab(next);
+    }
+    // Ctrl+B — Beautify JSON body
+    else if ((e.key === 'b' || e.key === 'B') && !inInput) {
+      e.preventDefault();
+      if (S.bodyType === 'json') beautifyBody();
+    }
+    // Ctrl+K — Focus URL bar
+    else if (e.key === 'k' || e.key === 'K') {
+      e.preventDefault();
+      const urlInput = document.getElementById('url-input');
+      if (urlInput) { urlInput.focus(); urlInput.select(); }
+    }
+  }
+
+  // Escape — Cancel in-flight request
+  if (e.key === 'Escape' && !e.ctrlKey && !e.metaKey) {
+    if (currentAbortController) {
+      e.preventDefault();
+      cancelRequest();
+    }
+  }
+});
+
 function formatSize(b){ if(b<1024) return b+'B'; if(b<1048576) return (b/1024).toFixed(1)+'KB'; return (b/1048576).toFixed(1)+'MB'; }
 
 function copyResponse(){
@@ -2753,7 +2964,7 @@ function renderCollectionNode(c){
   ];
   const totalCount=c.total_requests||(c.requests||[]).length;
   return `<div class="coll-group" id="coll-${c.id}">
-    <div class="coll-header" onclick="toggleColl(${c.id})">
+    <div class="coll-header" onclick="toggleColl(${c.id})" ondragover="nodeDragOver(event)" ondragleave="nodeDragLeave(event)" ondrop="nodeDrop(event, 'collection', ${c.id})">
       <span class="coll-arrow" id="ca-${c.id}">▶</span>
       <span class="coll-icon">${ICONS.folder}</span>
       <span class="coll-name" title="${esc(c.name)}">${esc(c.name)}</span>
@@ -2787,7 +2998,7 @@ function renderFolderNode(f,collId){
   ];
   const childCount=(f.folders||[]).length+(f.requests||[]).length;
   return `<div class="folder-node" id="fn-${f.id}">
-    <div class="folder-hdr" onclick="toggleFolder(${f.id})">
+    <div class="folder-hdr" onclick="toggleFolder(${f.id})" ondragover="nodeDragOver(event)" ondragleave="nodeDragLeave(event)" ondrop="nodeDrop(event, 'folder', ${f.id}, ${collId})">
       <span class="f-arrow" id="farr-${f.id}">▶</span>
       <span class="folder-ic" id="fic-${f.id}" style="display:inline-flex">${ICONS.folder}</span>
       <span class="folder-nm" title="${esc(f.name)}">${esc(f.name)}</span>
@@ -2809,7 +3020,7 @@ function renderFolderNode(f,collId){
 }
 
 function renderRequestNode(r){
-  return `<div class="req-item" id="ri-${r.id}" onclick="loadRequestInTab(${r.id})">
+  return `<div class="req-item" id="ri-${r.id}" onclick="loadRequestInTab(${r.id})" draggable="true" ondragstart="reqDragStart(event, ${r.id})" ondragend="this.classList.remove('dragging')">
     <span class="req-method m-${r.method}">${r.method}</span>
     <span class="req-name-text" title="${esc(r.name)}">${esc(r.name)}</span>
     <span class="req-item-actions">
@@ -2818,6 +3029,42 @@ function renderRequestNode(r){
       <button class="req-act-btn danger" title="Delete"    onclick="event.stopPropagation();deleteReq(${r.id})">${ICONS.trash}</button>
     </span>
   </div>`;
+}
+
+// ── Drag & Drop ────────────────────────────
+function reqDragStart(e, id) {
+  e.dataTransfer.setData('text/plain', id);
+  e.dataTransfer.effectAllowed = 'move';
+  e.target.classList.add('dragging');
+}
+function nodeDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  e.currentTarget.classList.add('drag-over');
+}
+function nodeDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over');
+}
+async function nodeDrop(e, type, targetId, collId) {
+  e.preventDefault(); e.stopPropagation();
+  e.currentTarget.classList.remove('drag-over');
+  const reqId = e.dataTransfer.getData('text/plain');
+  if(!reqId) return;
+  const newCollId = type === 'collection' ? targetId : collId;
+  const newFolderId = type === 'folder' ? targetId : null;
+  try {
+    const res = await fetch(`/api/requests/${reqId}/move`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({collection_id: newCollId, folder_id: newFolderId})
+    });
+    if(!res.ok) throw new Error('Move failed');
+    await loadCollections();
+    if(type === 'collection') ensureCollOpen(targetId);
+    else if(type === 'folder') ensureFolderOpen(targetId);
+  } catch(err) {
+    toast('Failed to move request', 'error');
+  }
 }
 
 // ── Toggle collection / folder ────────────────────────────
