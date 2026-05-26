@@ -156,6 +156,20 @@ def init_db():
         except Exception:
             pass
 
+        # Migration: add global_vars to users if missing
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN global_vars TEXT DEFAULT '{}'")
+            conn.commit()
+        except Exception:
+            pass
+
+        # Migration: add vars to collections if missing
+        try:
+            conn.execute("ALTER TABLE collections ADD COLUMN vars TEXT DEFAULT '{}'")
+            conn.commit()
+        except Exception:
+            pass
+
 init_db()
 
 
@@ -368,6 +382,26 @@ def auth_logout():
     session.clear()
     return jsonify({"ok": True})
 
+@app.route("/api/globals", methods=["GET"])
+def get_globals():
+    uid = get_current_user_id()
+    if not uid:
+        return jsonify({"vars": "{}"}), 200
+    with get_db() as conn:
+        row = conn.execute("SELECT global_vars FROM users WHERE id=?", (uid,)).fetchone()
+    if not row or not row["global_vars"]:
+        return jsonify({"vars": "{}"}), 200
+    return jsonify({"vars": row["global_vars"]}), 200
+
+@app.route("/api/globals", methods=["PUT"])
+def update_globals():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    vars_str = json.dumps((request.json or {}).get("vars", {}))
+    with get_db() as conn:
+        conn.execute("UPDATE users SET global_vars=? WHERE id=?", (vars_str, uid))
+    return jsonify({"ok": True})
+
 # ─── Proxy / Execute Request ──────────────────────────────────────────────────
 
 @app.route("/api/execute", methods=["POST"])
@@ -401,6 +435,20 @@ def execute_request():
         auth = (auth_data.get("username",""), auth_data.get("password",""))
     elif auth_type == "bearer":
         headers["Authorization"] = f"Bearer {auth_data.get('token','')}"
+    elif auth_type == "oauth2":
+        prefix = auth_data.get("prefix", "Bearer")
+        headers["Authorization"] = f"{prefix} {auth_data.get('token','')}".strip()
+    elif auth_type == "awsv4":
+        try:
+            from requests_aws4auth import AWS4Auth
+            access_key = auth_data.get("access_key", "")
+            secret_key = auth_data.get("secret_key", "")
+            region = auth_data.get("region", "us-east-1")
+            service = auth_data.get("service", "execute-api")
+            session_token = auth_data.get("session_token", "") or None
+            auth = AWS4Auth(access_key, secret_key, region, service, session_token=session_token)
+        except ImportError:
+            return jsonify({"error": "requests-aws4auth is required for AWS Signature. Install it with: pip install requests-aws4auth"}), 400
     elif auth_type == "apikey":
         key_loc = auth_data.get("location","header")
         key_name= auth_data.get("key","X-API-Key")
@@ -416,8 +464,15 @@ def execute_request():
             if "Content-Type" not in headers: headers["Content-Type"] = "application/json"
         except json.JSONDecodeError as e:
             return jsonify({"error": f"Invalid {body_type.upper()} body: {e}"}), 400
-    elif body_type == "raw":
+    elif body_type in ("raw", "soap", "xml"):
         req_body = body_content.encode("utf-8")
+        if protocol == "soap" or body_type == "soap":
+            if "Content-Type" not in headers: headers["Content-Type"] = "text/xml; charset=utf-8"
+            soap_action = auth_data.get("soap_action", "")
+            if soap_action:
+                headers["SOAPAction"] = f'"{soap_action}"'
+        elif body_type == "xml" and "Content-Type" not in headers:
+            headers["Content-Type"] = "application/xml"
     elif body_type in ("form", "urlencoded"):
         try:   form_data = json.loads(body_content) if body_content.strip() else {}
         except: form_data = {}
@@ -433,6 +488,10 @@ def execute_request():
 
     start = time.time()
     try:
+        if protocol == "soap":
+            method = "POST"
+            if "Content-Type" not in headers: headers["Content-Type"] = "text/xml; charset=utf-8"
+            
         if protocol == "grpc":
             from grpc_requests import Client
             # format: host:port/service/method
@@ -567,6 +626,17 @@ def delete_collection(cid):
         col = conn.execute("SELECT user_id FROM collections WHERE id=?", (cid,)).fetchone()
         if not col or col["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
         conn.execute("DELETE FROM collections WHERE id=?", (cid,))
+    return jsonify({"ok": True})
+
+@app.route("/api/collections/<int:cid>/vars", methods=["PUT"])
+def update_collection_vars(cid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    vars_str = json.dumps((request.json or {}).get("vars", {}))
+    with get_db() as conn:
+        col = conn.execute("SELECT user_id FROM collections WHERE id=?", (cid,)).fetchone()
+        if not col or col["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
+        conn.execute("UPDATE collections SET vars=? WHERE id=?", (vars_str, cid))
     return jsonify({"ok": True})
 
 
@@ -1026,9 +1096,14 @@ def update_environment(eid):
 
 @app.route("/api/environments/<int:eid>/activate", methods=["POST"])
 def activate_environment(eid):
+    uid = get_current_user_id()
     with get_db() as conn:
-        conn.execute("UPDATE environments SET active=0")
-        conn.execute("UPDATE environments SET active=1 WHERE id=?", (eid,))
+        if uid:
+            conn.execute("UPDATE environments SET active=0 WHERE user_id=?", (uid,))
+            conn.execute("UPDATE environments SET active=1 WHERE id=? AND user_id=?", (eid, uid))
+        else:
+            conn.execute("UPDATE environments SET active=0 WHERE user_id IS NULL")
+            conn.execute("UPDATE environments SET active=1 WHERE id=? AND user_id IS NULL", (eid,))
     return jsonify({"ok": True})
 
 @app.route("/api/environments/<int:eid>", methods=["DELETE"])
@@ -1262,7 +1337,9 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 #app{display:grid;grid-template-columns:260px 1fr;grid-template-rows:52px 1fr;height:100vh;position:relative;z-index:1}
 #topbar{grid-column:1/-1;display:flex;align-items:center;background:var(--bg1);border-bottom:1px solid var(--border);z-index:20;padding:0}
 #sidebar{background:var(--bg1);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
-#main{display:flex;flex-direction:column;overflow:hidden;background:var(--bg0)}
+#main{display:flex;flex-direction:column;overflow:hidden;background:var(--bg0);position:relative}
+#view-builder,#view-environments{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+#view-environments{display:none}
 
 /* ── Topbar ── */
 .logo-area{display:flex;align-items:center;gap:10px;padding:0 18px;width:260px;border-right:1px solid var(--border);height:100%;flex-shrink:0}
@@ -1756,7 +1833,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 
   <!-- Main -->
   <main id="main">
-    <div id="view-builder" style="display:flex;flex-direction:column;overflow:hidden;flex:1;height:100%">
+    <div id="view-builder">
 
       <!-- Request tab bar -->
       <div id="req-tabs-bar">
@@ -1772,6 +1849,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
           </div>
           <select id="protocol-select" class="method-select" style="width:105px; border-right: 1px solid var(--border2);" onchange="updateProtocolUI(); markTabDirty()">
             <option value="http">HTTP</option>
+            <option value="soap">SOAP</option>
             <option value="ws">WebSocket</option>
             <option value="socketio">Socket.io</option>
             <option value="mqtt">MQTT</option>
@@ -1829,6 +1907,8 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
               <button class="body-type-btn" onclick="setBodyType('raw')">raw</button>
               <button class="body-type-btn" onclick="setBodyType('form')">form-data</button>
               <button class="body-type-btn" onclick="setBodyType('urlencoded')">urlencoded</button>
+              <button class="body-type-btn" onclick="setBodyType('soap')">soap</button>
+              <button class="body-type-btn" onclick="setBodyType('xml')">xml</button>
               <button class="beautify-btn" id="beautify-btn" style="display:none" onclick="beautifyBody()">✨ Beautify</button>
             </div>
             <div id="body-none-msg" style="color:var(--txt3);font-size:12px;font-family:var(--mono);padding:8px 0">This request does not have a body.</div>
@@ -1860,6 +1940,8 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
               <option value="none">No Auth</option>
               <option value="basic">Basic Auth</option>
               <option value="bearer">Bearer Token</option>
+              <option value="oauth2">OAuth 2.0</option>
+              <option value="awsv4">AWS Signature</option>
               <option value="apikey">API Key</option>
             </select>
             <div id="auth-fields"></div>
@@ -2009,6 +2091,24 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
     <div class="modal-actions">
       <button class="btn-secondary" onclick="closeModal('folder-modal')">Cancel</button>
       <button class="btn-primary" type="button" onclick="confirmNewFolder()">Create Folder</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Collection Variables Modal ══ -->
+<div class="modal-overlay" id="coll-vars-modal">
+  <div class="modal" style="width: 500px">
+    <div class="modal-header"><h3>Collection Variables <span id="coll-vars-name" style="color:var(--txt3);font-size:12px;font-weight:400;margin-left:8px"></span></h3><button class="modal-close" onclick="closeModal('coll-vars-modal')">×</button></div>
+    <div class="kv-wrap" style="max-height: 400px; overflow-y: auto;">
+      <table class="kv-table">
+        <thead><tr><th>Variable</th><th>Value</th><th style="width:36px"></th></tr></thead>
+        <tbody id="coll-vars-body"></tbody>
+      </table>
+    </div>
+    <button class="add-row-btn" onclick="addCollVarRow()">+ Add Variable</button>
+    <div class="modal-actions" style="margin-top:20px">
+      <button class="btn-secondary" onclick="closeModal('coll-vars-modal')">Cancel</button>
+      <button class="btn-primary" onclick="saveCollectionVars()">Save Variables</button>
     </div>
   </div>
 </div>
@@ -2181,6 +2281,8 @@ function restoreTab(t){
   renderAuthFields();
   if(t.authType==='basic'){ setIV('auth-username',t.authData.username||''); setIV('auth-password',t.authData.password||''); }
   else if(t.authType==='bearer') setIV('auth-token',t.authData.token||'');
+  else if(t.authType==='oauth2'){ setIV('auth-token',t.authData.token||''); setIV('auth-prefix',t.authData.prefix||'Bearer'); }
+  else if(t.authType==='awsv4'){ setIV('auth-access-key',t.authData.access_key||''); setIV('auth-secret-key',t.authData.secret_key||''); setIV('auth-region',t.authData.region||'us-east-1'); setIV('auth-service',t.authData.service||'execute-api'); setIV('auth-session-token',t.authData.session_token||''); }
   else if(t.authType==='apikey'){ setIV('auth-key',t.authData.key||''); setIV('auth-value',t.authData.value||''); setIV('auth-location',t.authData.location||'header'); }
   if(t.response){ S.response=t.response; renderResponse(t.response); }
   else { S.response=null; document.getElementById('resp-empty').style.display='flex'; document.getElementById('resp-body-content').style.display='none'; document.getElementById('resp-status-wrap').style.display='none'; document.getElementById('resp-view-bar').style.display='none'; document.getElementById('resp-body-tree').style.display='none'; document.getElementById('resp-body-raw').style.display='none'; document.getElementById('resp-body-preview').style.display='none'; }
@@ -2248,11 +2350,12 @@ if(localStorage.getItem('requestlab_theme') === 'light') {
 }
 
 const S = {
-  bodyType:'none', authType:'none', authData:{}, response:null,
+  globalVars:{}, bodyType:'none', authType:'none', authData:{}, response:null,
   collections:[], history:[], environments:[],
   renameCollId:null, renameReqId:null, renameFolderId:null,
   newFolderCollId:null, newFolderParentId:null,
   quickAddCollId:null, quickAddFolderId:null,
+  editCollVarsId:null,
   currentUser:null, pendingCloseIdx:null,
 };
 
@@ -2391,7 +2494,19 @@ function showApp(){
   } else {
     document.getElementById('user-menu').style.display='none';
   }
-  loadCollections(); loadHistory(); loadEnvironments();
+  loadCollections(); loadHistory(); loadEnvironments(); loadGlobals();
+}
+
+async function loadGlobals(){
+  try {
+    const res = await fetch('/api/globals');
+    const data = await res.json();
+    try {
+      S.globalVars = typeof data.vars === 'string' ? JSON.parse(data.vars) : (data.vars || {});
+    } catch(pe) { S.globalVars = {}; }
+    if(!S.globalVars || typeof S.globalVars !== 'object') S.globalVars = {};
+    renderEnvironmentsView();
+  } catch(e) { console.error('loadGlobals error:', e); S.globalVars = {}; }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2507,6 +2622,7 @@ function switchView(v){
   document.querySelectorAll('.top-tab').forEach((t,i)=>t.classList.toggle('active',['builder','environments'][i]===v));
   document.getElementById('view-builder').style.display=v==='builder'?'flex':'none';
   document.getElementById('view-environments').style.display=v==='environments'?'flex':'none';
+  if(v==='environments') { loadEnvironments(); renderEnvironmentsView(); }
 }
 
 function sidebarTab(t){
@@ -2533,7 +2649,7 @@ function respTab(name){
 
 function updateProtocolUI() {
   const protocol = document.getElementById('protocol-select').value;
-  const isReqRes = ['http', 'grpc'].includes(protocol);
+  const isReqRes = ['http', 'grpc', 'soap'].includes(protocol);
   
   document.getElementById('http-panel').style.display = isReqRes ? 'flex' : 'none';
   document.getElementById('realtime-panel').style.display = isReqRes ? 'none' : 'flex';
@@ -2544,7 +2660,7 @@ function updateProtocolUI() {
   
   if (isReqRes) {
     sendBtn.style.display = '';
-    methodSelect.style.display = protocol === 'http' ? '' : 'none'; // hide method for grpc
+    methodSelect.style.display = protocol === 'http' ? '' : 'none'; // hide method for grpc and soap
     document.getElementById('realtime-config-bar').style.display = 'none';
   } else {
     sendBtn.style.display = 'none';
@@ -2652,13 +2768,16 @@ function setBodyType(type){
   document.querySelectorAll('.body-type-btn').forEach(b=>b.classList.toggle('active',b.textContent.trim()===type));
   document.getElementById('body-none-msg').style.display=type==='none'?'block':'none';
   const ew = document.getElementById('body-editor-wrap');
-  if(ew) ew.style.display=['json','raw'].includes(type)?'block':'none';
+  if(ew) ew.style.display=['json','raw','soap','xml'].includes(type)?'block':'none';
   const gw = document.getElementById('body-graphql-wrap');
   if(gw) gw.style.display=type==='graphql'?'block':'none';
-  document.getElementById('beautify-btn').style.display=type==='json'?'':'none';
+  document.getElementById('beautify-btn').style.display=['json','soap','xml'].includes(type)?'':'none';
   document.getElementById('body-kv-wrap').style.display=['form','urlencoded'].includes(type)?'block':'none';
   if(type==='json'&&!document.getElementById('body-editor').value.trim()){
     document.getElementById('body-editor').value='{\n  \n}';
+    if(typeof updateBodyHighlight === 'function') updateBodyHighlight();
+  } else if((type==='soap'||type==='xml')&&!document.getElementById('body-editor').value.trim()){
+    document.getElementById('body-editor').value = type==='soap' ? '<?xml version="1.0" encoding="utf-8"?>\n<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">\n  <soap:Body>\n    \n  </soap:Body>\n</soap:Envelope>' : '<?xml version="1.0" encoding="utf-8"?>\n<root>\n  \n</root>';
     if(typeof updateBodyHighlight === 'function') updateBodyHighlight();
   }
 }
@@ -2671,6 +2790,8 @@ function renderAuthFields(){
   const c=document.getElementById('auth-fields'); c.innerHTML='';
   if(t==='basic') c.innerHTML=af('Username','auth-username',S.authData.username||'')+af('Password','auth-password',S.authData.password||'','password');
   else if(t==='bearer') c.innerHTML=af('Token','auth-token',S.authData.token||'','password');
+  else if(t==='oauth2') c.innerHTML=af('Access Token','auth-token',S.authData.token||'','password')+af('Header Prefix','auth-prefix',S.authData.prefix||'Bearer');
+  else if(t==='awsv4') c.innerHTML=af('Access Key','auth-access-key',S.authData.access_key||'')+af('Secret Key','auth-secret-key',S.authData.secret_key||'','password')+af('AWS Region','auth-region',S.authData.region||'us-east-1')+af('Service Name','auth-service',S.authData.service||'execute-api')+af('Session Token','auth-session-token',S.authData.session_token||'','password');
   else if(t==='apikey') c.innerHTML=af('Key Name','auth-key',S.authData.key||'X-API-Key')+af('Key Value','auth-value',S.authData.value||'','password')+`<div class="auth-field"><label>Add to</label><select class="auth-type-select" id="auth-location" style="margin-bottom:0"><option value="header" ${S.authData.location==='header'?'selected':''}>Header</option><option value="query" ${S.authData.location==='query'?'selected':''}>Query Param</option></select></div>`;
 }
 function af(label,id,val='',type='text'){ 
@@ -2682,6 +2803,8 @@ function getAuthData(){
   const t=document.getElementById('auth-type').value;
   if(t==='basic') return {username:gv('auth-username'),password:gv('auth-password')};
   if(t==='bearer') return {token:gv('auth-token')};
+  if(t==='oauth2') return {token:gv('auth-token'),prefix:gv('auth-prefix')};
+  if(t==='awsv4') return {access_key:gv('auth-access-key'),secret_key:gv('auth-secret-key'),region:gv('auth-region'),service:gv('auth-service'),session_token:gv('auth-session-token')};
   if(t==='apikey') return {key:gv('auth-key'),value:gv('auth-value'),location:gv('auth-location')};
   return {};
 }
@@ -2698,8 +2821,35 @@ function updateMethodColor(){
 // ══════════════════════════════════════════════════════════
 function getActiveEnv(){ return S.environments.find(e=>e.active)||null; }
 function getEnvVars(){
-  const env=getActiveEnv(); if(!env||!env.vars) return {};
-  try{ return typeof env.vars==='string'?JSON.parse(env.vars):(env.vars||{}); }catch(e){ return {}; }
+  let gVars = {};
+  if (S.globalVars && typeof S.globalVars === 'object') gVars = S.globalVars;
+  else if (typeof S.globalVars === 'string') { 
+    try { 
+      const parsed = JSON.parse(S.globalVars); 
+      if(parsed && typeof parsed === 'object') gVars = parsed; 
+    } catch(e) {} 
+  }
+  let cVars = {};
+  const t = currentTab();
+  if(t && t.savedReqId && S.collections) {
+    const coll = S.collections.find(c => {
+       const reqs = c.requests || [];
+       const fReqs = (c.folders || []).flatMap(f => f.requests || []);
+       return reqs.some(r => r.id === t.savedReqId) || fReqs.some(r => r.id === t.savedReqId);
+    });
+    if (coll && coll.vars) {
+      try { cVars = typeof coll.vars === 'string' ? JSON.parse(coll.vars) : coll.vars; } catch(e){}
+    }
+  }
+  let eVars = {};
+  const env = getActiveEnv();
+  if(env && env.vars) {
+    try { 
+      const parsed = typeof env.vars==='string'?JSON.parse(env.vars):env.vars; 
+      if(parsed && typeof parsed === 'object') eVars = parsed;
+    }catch(e){}
+  }
+  return Object.assign({}, gVars, cVars, eVars);
 }
 function substituteVars(str){
   if(typeof str!=='string') return str;
@@ -2964,7 +3114,7 @@ async function sendRequest(){
       result=await res.json();
     } else {
       let bodyContent='';
-      if(['json','raw'].includes(bodyType)){
+      if(['json','raw','soap','xml'].includes(bodyType)){
         let raw=document.getElementById('body-editor').value;
         if(bodyType==='json') raw=stripJsonComments(raw);
         bodyContent=substituteVars(raw);
@@ -3346,6 +3496,7 @@ function renderCollectionNode(c){
       <span class="coll-actions" onclick="event.stopPropagation()">
         <button class="coll-act-btn accent-btn" title="New Request" onclick="quickAddReq(${c.id},null)">${ICONS.filePlus}</button>
         <button class="coll-act-btn accent-btn" title="New Folder"  onclick="openNewFolderModal(${c.id},null)">${ICONS.folderPlus}</button>
+        <button class="coll-act-btn accent-btn" title="Variables"   onclick="openCollVarsModal(${c.id},'${esc(c.name)}')">{v}</button>
         <button class="coll-act-btn" title="Export"  onclick="exportCollection(${c.id},'${esc(c.name)}')">${ICONS.download}</button>
         <button class="coll-act-btn" title="Rename"  onclick="openRenameCollModal(${c.id},'${esc(c.name)}')">${ICONS.edit}</button>
         <button class="coll-act-btn danger" title="Delete" onclick="deleteCollection(${c.id})">${ICONS.trash}</button>
@@ -3604,6 +3755,44 @@ function exportCollection(id,name){
   toast(`Exporting "${name}"…`,'info');
 }
 
+function openCollVarsModal(id,name){
+  S.editCollVarsId=id;
+  document.getElementById('coll-vars-name').textContent=name;
+  const coll=S.collections.find(c=>c.id===id);
+  const tbody=document.getElementById('coll-vars-body');
+  tbody.innerHTML='';
+  let vars={};
+  if(coll&&coll.vars) { try{ vars=typeof coll.vars==='string'?JSON.parse(coll.vars):coll.vars; }catch(e){} }
+  const entries=Object.entries(vars);
+  if(!entries.length) addCollVarRow();
+  else entries.forEach(([k,v])=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><input class="kv-input" value="${esc(k)}" placeholder="variable_name"></td><td><input class="kv-input" value="${esc(String(v))}" placeholder="value"></td><td><button class="del-row-btn" onclick="this.closest('tr').remove()" style="opacity:1">✕</button></td>`;
+    tbody.appendChild(tr);
+  });
+  openModal('coll-vars-modal');
+}
+
+function addCollVarRow(){
+  const tbody=document.getElementById('coll-vars-body');
+  const tr=document.createElement('tr');
+  tr.innerHTML=`<td><input class="kv-input" placeholder="variable_name"></td><td><input class="kv-input" placeholder="value"></td><td><button class="del-row-btn" onclick="this.closest('tr').remove()" style="opacity:1">✕</button></td>`;
+  tbody.appendChild(tr);
+}
+
+async function saveCollectionVars(){
+  if(!S.editCollVarsId) return;
+  const tbody=document.getElementById('coll-vars-body');
+  const rows=[...tbody.querySelectorAll('tr')];
+  const vars={};
+  rows.forEach(tr=>{ const inputs=tr.querySelectorAll('input'); const key=inputs[0]?.value.trim(); if(key) vars[key]=inputs[1]?.value||''; });
+  const res=await fetch('/api/collections/'+S.editCollVarsId+'/vars',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({vars})});
+  if(!res.ok){toast('Failed to save collection variables','error');return;}
+  closeModal('coll-vars-modal');
+  await loadCollections();
+  toast('Collection variables saved','success');
+}
+
 function openImportModal(){
   document.getElementById('import-status').textContent='';
   document.getElementById('import-modal').classList.add('open');
@@ -3801,9 +3990,11 @@ async function clearHistory(){
 //  ENVIRONMENTS
 // ══════════════════════════════════════════════════════════
 async function loadEnvironments(){
-  const res=await fetch('/api/environments');
-  S.environments=await res.json();
-  renderEnvironmentsView(); renderEnvSelector();
+  try {
+    const res=await fetch('/api/environments');
+    S.environments=await res.json();
+    renderEnvironmentsView(); renderEnvSelector();
+  } catch(e) { console.error('loadEnvironments error:', e); }
 }
 
 function renderEnvSelector(){
@@ -3815,15 +4006,47 @@ function renderEnvSelector(){
 function selectEnv(id){ if(id) activateEnv(parseInt(id)); }
 
 function renderEnvironmentsView(){
+  try {
   const panel=document.getElementById('envs-panel');
-  if(!S.environments.length){
-    panel.innerHTML=`<div class="empty-state" style="height:200px"><div class="empty-icon">⚙</div><p>No environments yet. Create one to use variables.</p></div>`;
-    return;
-  }
-  panel.innerHTML=S.environments.map(env=>{
-    let vars={}; try{vars=typeof env.vars==='string'?JSON.parse(env.vars):(env.vars||{});}catch(e){}
-    const entries=Object.entries(vars);
-    return `<div class="env-card" id="env-card-${env.id}">
+  if(!panel) { console.error('envs-panel not found'); return; }
+  
+  let gVars = {};
+  try {
+    if (S.globalVars && typeof S.globalVars === 'object') gVars = S.globalVars;
+    else if (typeof S.globalVars === 'string') { 
+      const parsed = JSON.parse(S.globalVars); 
+      if(parsed && typeof parsed === 'object') gVars = parsed; 
+    }
+  } catch(e) { gVars = {}; }
+  
+  const gEntries = Object.entries(gVars);
+  let gHtml = `<div class="env-card" id="env-card-global">
+      <div class="env-card-header">
+        <span style="font-weight:600;color:var(--acc)">Global Variables</span>
+        <span class="env-active-badge">Always Active</span>
+      </div>
+      <div class="kv-wrap" style="margin-bottom:10px"><table class="kv-table">
+        <thead><tr><th>Variable</th><th>Value</th><th style="width:36px"></th></tr></thead>
+        <tbody id="env-vars-global">
+          ${gEntries.map(([k,v])=>`<tr><td><input class="kv-input" value="${esc(k)}" placeholder="variable_name"></td><td><input class="kv-input" value="${esc(String(v))}" placeholder="value"></td><td><button class="del-row-btn" onclick="this.closest('tr').remove()" style="opacity:1">✕</button></td></tr>`).join('')}
+        </tbody>
+      </table></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="add-row-btn" style="margin-top:0" onclick="addEnvVar('global')">+ Add Variable</button>
+        <button class="env-save-btn" onclick="saveGlobals()">Save Globals</button>
+      </div>
+    </div>`;
+
+  let html = gHtml;
+  if(S.environments.length){
+    html += S.environments.map(env=>{
+      let vars={}; 
+      try {
+        const parsed = typeof env.vars==='string'?JSON.parse(env.vars):env.vars;
+        if(parsed && typeof parsed === 'object') vars = parsed;
+      } catch(e){}
+      const entries=Object.entries(vars);
+      return `<div class="env-card" id="env-card-${env.id}">
       <div class="env-card-header">
         <input class="env-name-input" value="${esc(env.name)}" id="en-${env.id}" placeholder="Environment name">
         ${env.active?'<span class="env-active-badge">● Active</span>':`<button class="activate-btn" onclick="activateEnv(${env.id})">Set Active</button>`}
@@ -3840,7 +4063,10 @@ function renderEnvironmentsView(){
         <button class="env-save-btn" onclick="saveEnv(${env.id})">Save Changes</button>
       </div>
     </div>`;
-  }).join('');
+    }).join('');
+  }
+  panel.innerHTML = html;
+  } catch(e) { console.error('renderEnvironmentsView error:', e); }
 }
 
 function addEnvVar(id){
@@ -3861,6 +4087,16 @@ async function saveEnv(id){
   const envIdx=S.environments.findIndex(e=>e.id===id);
   if(envIdx>=0){S.environments[envIdx].name=name;S.environments[envIdx].vars=vars;}
   renderEnvSelector(); toast('Environment saved','success');
+}
+
+async function saveGlobals(){
+  const rows=[...document.querySelectorAll('#env-vars-global tr')];
+  const vars={};
+  rows.forEach(tr=>{ const inputs=tr.querySelectorAll('input'); const key=inputs[0]?.value.trim(); if(key) vars[key]=inputs[1]?.value||''; });
+  const res=await fetch('/api/globals',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({vars})});
+  if(!res.ok){toast('Failed to save global variables','error');return;}
+  S.globalVars=vars;
+  toast('Global variables saved','success');
 }
 
 async function createEnvironment(){
