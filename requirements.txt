@@ -1,3 +1,4 @@
 flask>=3.0.0
 requests>=2.31.0
- 
+grpcio>=1.60.0
+grpc_requests>=0.1.0

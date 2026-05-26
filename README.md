@@ -6,7 +6,7 @@ A full-featured Postman alternative built as a lightweight, lightning-fast Pytho
 
 ```bash
 # 1. Install dependencies
-pip install flask requests
+pip install -r requirements.txt
 
 # 2. Run the app
 python postman.py
@@ -19,6 +19,9 @@ open http://localhost:5000
 
 | Feature | Details |
 |---|---|
+| **Multi-Protocol Support** | Beyond HTTP REST, RequestLab now natively supports WebSockets, Socket.io, MQTT, gRPC, and GraphQL out-of-the-box. |
+| **Real-time Connections** | Dedicated chat-like interface for managing live WebSocket, Socket.io, and MQTT sessions. |
+| **OpenAPI / Swagger Import** | Instantly generate folders, requests, endpoints, parameters, and request bodies from OpenAPI 3.0 and Swagger 2.0 schemas, alongside standard Postman exports. |
 | **Multi-User Authentication** | Secure user accounts, login/signup flows, and SMTP-based password reset links. |
 | **Workspace Persistence** | Your open tabs, request bodies, and active tab states survive page reloads instantly via `localStorage`. |
 | **Dark / Light Themes** | Toggle instantly between a sleek Dark Mode and a clean Light Mode. Preference is remembered per device. |
@@ -26,14 +29,14 @@ open http://localhost:5000
 | **File Uploads** | First-class support for `multipart/form-data` with native file attachments. |
 | **HTTP Methods** | GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS |
 | **Request Builder** | URL bar, query params, custom headers, and request body building. |
-| **Body Types** | JSON, raw text, form-data (w/ files), x-www-form-urlencoded |
+| **Body Types** | JSON, GraphQL, raw text, form-data (w/ files), x-www-form-urlencoded |
 | **Authentication Profiles**| No auth, Basic Auth, Bearer Token, API Key (header or query) |
 | **Response Viewer** | Pretty-printed JSON, raw body, HTML preview, response headers, cookies |
 | **Response Stats** | Status code, response time (ms), body size |
 | **Collections & Folders** | Save, organize, and reload requests in nested folder structures. |
 | **History** | Keeps track of your latest requests with status codes and methods. |
 | **Environments** | Environment-specific variables with real-time `{{variable}}` substitution syntax across URLs, params, and bodies. |
-| **Import / Export** | Bring your existing Postman collections into RequestLab or backup your own setups. |
+| **Import / Export** | Bring your existing Postman collections or OpenAPI specs into RequestLab or backup your own setups. |
 
 ## Using Environments
 

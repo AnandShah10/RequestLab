@@ -388,6 +388,7 @@ def execute_request():
     auth_type   = data.get("auth_type", "none")
     auth_data   = data.get("auth_data", {})
     timeout     = data.get("timeout", 30)
+    protocol    = data.get("protocol", "http")
 
     if not url:
         return jsonify({"error": "URL is required"}), 400
@@ -409,12 +410,12 @@ def execute_request():
 
     req_body = None; req_json = None; form_data = None
 
-    if body_type == "json":
+    if body_type in ("json", "graphql"):
         try:
             req_json = json.loads(body_content) if body_content.strip() else None
             if "Content-Type" not in headers: headers["Content-Type"] = "application/json"
         except json.JSONDecodeError as e:
-            return jsonify({"error": f"Invalid JSON body: {e}"}), 400
+            return jsonify({"error": f"Invalid {body_type.upper()} body: {e}"}), 400
     elif body_type == "raw":
         req_body = body_content.encode("utf-8")
     elif body_type in ("form", "urlencoded"):
@@ -432,6 +433,31 @@ def execute_request():
 
     start = time.time()
     try:
+        if protocol == "grpc":
+            from grpc_requests import Client
+            # format: host:port/service/method
+            parts = url.split('/')
+            if len(parts) < 3:
+                return jsonify({"error": "Invalid gRPC URL. Expected format: host:port/service/method"}), 400
+            host_port = parts[0]
+            service = parts[1]
+            method_name = parts[2]
+            
+            client = Client.get_by_endpoint(host_port)
+            grpc_req_json = req_json if req_json else {}
+            grpc_resp = client.request(service, method_name, grpc_req_json)
+            
+            duration_ms = (time.time() - start) * 1000
+            result = {
+                "status_code": 200, "status_text": "OK",
+                "duration_ms": round(duration_ms, 2), "size_bytes": len(str(grpc_resp)),
+                "headers": {"content-type": "application/grpc+json"},
+                "body_text": json.dumps(grpc_resp, indent=2),
+                "body_json": grpc_resp
+            }
+            return jsonify(result)
+
+        # Standard HTTP Request
         resp = requests.request(
             method=method, url=url, params=params, headers=headers,
             json=req_json, data=form_data or req_body, files=req_files,
@@ -707,7 +733,68 @@ def import_collection():
                 process_items(data.get("item",[]))
             return jsonify({"ok":True,"id":cid,"name":name})
 
-        return jsonify({"error":"Unrecognised file. Export from Postman (v2/v2.1) or use a RequestLab export."}), 400
+        # OpenAPI / Swagger
+        if "openapi" in data or "swagger" in data:
+            name = data.get("info", {}).get("title", "Imported OpenAPI")
+            with get_db() as conn:
+                cid = conn.execute("INSERT INTO collections (name, user_id) VALUES (?, ?)", (name, uid)).lastrowid
+                tag_folders = {}
+                for tag in data.get("tags", []):
+                    tname = tag.get("name")
+                    if tname:
+                        fid = conn.execute("INSERT INTO folders (collection_id,parent_folder_id,name) VALUES (?,?,?)", (cid, None, tname)).lastrowid
+                        tag_folders[tname] = fid
+
+                base_url = ""
+                if "servers" in data and data["servers"]:
+                    base_url = data["servers"][0].get("url", "")
+                elif "host" in data:
+                    scheme = data.get("schemes", ["http"])[0]
+                    base_url = f"{scheme}://{data['host']}{data.get('basePath', '')}"
+
+                paths = data.get("paths", {})
+                for path, methods in paths.items():
+                    for method, op in methods.items():
+                        if method.lower() not in ["get", "post", "put", "delete", "patch", "options", "head"]:
+                            continue
+                        req_name = op.get("summary", op.get("operationId", path))
+                        
+                        folder_id = None
+                        if op.get("tags"):
+                            tname = op["tags"][0]
+                            if tname not in tag_folders:
+                                fid = conn.execute("INSERT INTO folders (collection_id,parent_folder_id,name) VALUES (?,?,?)", (cid, None, tname)).lastrowid
+                                tag_folders[tname] = fid
+                            folder_id = tag_folders[tname]
+
+                        req_url = base_url + path
+                        params = []
+                        headers = []
+                        for param in op.get("parameters", []):
+                            pin = param.get("in", "")
+                            pname = param.get("name", "")
+                            if pin == "query": params.append({"key": pname, "value": "", "enabled": True})
+                            elif pin == "header": headers.append({"key": pname, "value": "", "enabled": True})
+                            elif pin == "path": req_url = req_url.replace(f"{{{pname}}}", f":{pname}")
+
+                        body_type = "none"
+                        body_content = ""
+                        if "requestBody" in op:
+                            content = op["requestBody"].get("content", {})
+                            if "application/json" in content: body_type = "json"; body_content = "{}"
+                            elif "application/x-www-form-urlencoded" in content: body_type = "urlencoded"; body_content = "{}"
+                            elif "multipart/form-data" in content: body_type = "form"; body_content = "{}"
+                        elif "parameters" in op:
+                            for param in op["parameters"]:
+                                if param.get("in") == "body": body_type = "json"; body_content = "{}"; break
+
+                        conn.execute(
+                            "INSERT INTO requests (collection_id,folder_id,name,method,url,params,headers,body_type,body_content,auth_type,auth_data) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            (cid, folder_id, req_name, method.upper(), req_url, json.dumps(params), json.dumps(headers), body_type, body_content, "none", "{}")
+                        )
+            return jsonify({"ok": True, "id": cid, "name": name})
+
+        return jsonify({"error":"Unrecognised file. Export from Postman, OpenAPI JSON, or RequestLab."}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -1144,6 +1231,8 @@ HTML = r"""<!DOCTYPE html>
 <link rel="icon" type="image/png" href="/media/logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -1347,9 +1436,13 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .body-type-btn{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer;color:var(--txt3);font-family:var(--mono);transition:all .15s}
 .body-type-btn:hover{border-color:var(--border2);color:var(--txt2)}
 .body-type-btn.active{background:var(--acc-dim);border-color:var(--acc);color:var(--acc)}
-.code-editor{width:100%;min-height:180px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;font-size:12px;color:var(--txt);font-family:var(--mono);resize:vertical;outline:none;line-height:1.7;tab-size:2;transition:border-color .15s}
-.code-editor:focus{border-color:var(--acc)}
+.code-editor{width:100%;min-height:220px;max-height:50vh;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;font-size:13px;color:var(--txt);font-family:var(--mono);resize:vertical;outline:none;line-height:1.75;tab-size:2;transition:border-color .15s,box-shadow .15s}
+.code-editor:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(0,212,255,.08)}
 .code-editor::placeholder{color:var(--txt3)}
+#body-editor-wrap{position:relative}
+.body-editor-toolbar{display:flex;align-items:center;gap:6px;margin-bottom:8px}
+.body-editor-toolbar .editor-hint{font-size:10px;color:var(--txt3);font-family:var(--mono);margin-left:auto;opacity:.6}
+.body-editor-toolbar .editor-hint kbd{background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-size:9px;font-family:var(--mono)}
 
 /* ── Auth ── */
 .auth-type-select{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius);padding:7px 12px;font-size:12px;color:var(--txt);outline:none;cursor:pointer;font-family:var(--mono);margin-bottom:14px;transition:border-color .15s}
@@ -1361,8 +1454,13 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .auth-field input::placeholder{color:var(--txt3)}
 
 /* ── Response panel ── */
-#response-panel{background:var(--bg1);border-top:1px solid var(--border);display:flex;flex-direction:column;min-height:200px;max-height:48vh}
+#response-panel{background:var(--bg1);border-top:1px solid var(--border);display:flex;flex-direction:column;min-height:40px;max-height:48vh;transition:max-height .2s ease,min-height .2s ease}
+#response-panel.collapsed{min-height:40px;max-height:40px;overflow:hidden}
+#response-panel.collapsed .tab-bar,#response-panel.collapsed .resp-body{display:none !important}
 .resp-topbar{display:flex;align-items:center;gap:10px;padding:8px 16px;background:var(--bg1);border-bottom:1px solid var(--border);flex-shrink:0}
+.resp-close-btn{background:none;border:1px solid var(--border);border-radius:var(--radius);color:var(--txt3);cursor:pointer;padding:3px 8px;font-size:11px;font-family:var(--mono);transition:all .15s;display:flex;align-items:center;gap:4px}
+.resp-close-btn:hover{color:var(--txt);border-color:var(--border2);background:var(--bg3)}
+.resp-close-btn svg{width:12px;height:12px}
 .resp-label{font-size:10px;font-weight:700;letter-spacing:1px;color:var(--txt3);text-transform:uppercase}
 .status-badge{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;font-family:var(--mono)}
 .s-2xx{background:#3dd68c20;color:#3dd68c}.s-3xx{background:#79c0ff20;color:#79c0ff}
@@ -1499,6 +1597,46 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .auth-skip:hover{color:var(--acc)}
 .coll-header.drag-over, .folder-hdr.drag-over { background: rgba(0, 212, 255, 0.15); border-radius: 4px; }
 .req-item.dragging { opacity: 0.5; }
+
+/* ── Sidebar Collapse ── */
+.sidebar-toggle{background:none;border:none;color:var(--txt3);cursor:pointer;padding:4px 6px;border-radius:var(--radius);transition:all .15s;display:flex;align-items:center;justify-content:center;margin-left:auto;flex-shrink:0}
+.sidebar-toggle:hover{color:var(--acc);background:var(--bg3)}
+#app{transition:grid-template-columns .2s ease}
+#app.sidebar-collapsed{grid-template-columns:0px 1fr !important}
+#app.sidebar-collapsed #sidebar{overflow:hidden;width:0;min-width:0;border-right:none;padding:0;opacity:0;pointer-events:none}
+#app.sidebar-collapsed .logo-area{width:auto !important;min-width:auto;border-right:1px solid var(--border)}
+#app.sidebar-collapsed #sidebar-drag{display:none !important}
+
+/* ── Sidebar Resize Handle ── */
+#sidebar-drag{position:absolute;top:52px;width:5px;cursor:col-resize;z-index:50;bottom:0;transition:background .15s}
+#sidebar-drag:hover,#sidebar-drag.dragging{background:rgba(0,212,255,.25)}
+
+/* ── Body Error Bar ── */
+.body-error-bar{display:none;padding:7px 14px;font-size:11px;font-family:var(--mono);color:#f47067;background:linear-gradient(135deg,rgba(244,112,103,.06),rgba(244,112,103,.12));border:1px solid rgba(244,112,103,.25);border-radius:var(--radius);margin-top:8px;align-items:center;gap:8px;animation:errSlideIn .2s ease}
+@keyframes errSlideIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.body-error-bar.visible{display:flex}
+.body-error-bar .err-icon{font-weight:700;flex-shrink:0;font-size:13px}
+.body-error-bar .err-msg{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.body-error-bar .err-line{flex-shrink:0;color:var(--txt3);font-size:10px;background:rgba(244,112,103,.15);padding:2px 8px;border-radius:10px}
+.body-editor-invalid{border-color:rgba(244,112,103,.5) !important;box-shadow:0 0 0 3px rgba(244,112,103,.1) !important}
+
+/* ── JSON Tree View ── */
+.json-tree{font-family:var(--mono);font-size:12.5px;line-height:1.8;padding:8px 0;margin:0}
+.jt-row{display:flex;align-items:center;white-space:pre;min-height:24px;padding:1px 8px;border-radius:4px;transition:background .1s}
+.jt-row:hover{background:rgba(0,212,255,.04)}
+.jt-toggle{cursor:pointer;user-select:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;color:var(--txt3);transition:all .15s;font-size:9px;border-radius:3px;margin-right:2px}
+.jt-toggle:hover{color:var(--acc);background:var(--bg3)}
+.jt-toggle.closed{transform:rotate(-90deg)}
+.jt-bracket{color:var(--txt3);font-weight:600}
+.jt-ell{color:var(--acc);cursor:pointer;padding:1px 8px;background:var(--acc-dim);border-radius:4px;font-size:10px;margin:0 4px;font-style:normal;font-weight:600;transition:all .15s}
+.jt-ell:hover{background:var(--acc);color:#000}
+.jt-ln{color:var(--txt3);opacity:.3;min-width:36px;text-align:right;padding-right:12px;user-select:none;font-size:11px}
+.jt-colon{color:var(--txt3);margin:0 2px}
+.jt-comma{color:var(--txt3)}
+.jt-count{color:var(--txt3);font-size:10px;font-style:italic;margin-left:8px;opacity:.5;background:var(--bg3);padding:1px 8px;border-radius:10px}
+.jt-children{margin-left:4px;padding-left:16px;border-left:1px solid var(--border)}
+.jt-children:hover{border-left-color:var(--acc-dim)}
+#resp-body-tree{display:none;overflow:auto;padding:12px 20px}
 </style>
 </head>
 <body>
@@ -1558,12 +1696,14 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 </div>
 
 <div id="app" style="display:none">
+<div id="sidebar-drag" style="left:259px"></div>
 
   <!-- Topbar -->
   <header id="topbar">
     <div class="logo-area">
       <div class="logo-mark">R</div>
       <div class="logo-text">Request<span>Lab</span></div>
+      <button class="sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar (Ctrl+\\)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg></button>
     </div>
     <div class="top-nav">
       <button class="top-tab active" onclick="switchView('builder')">Request Builder</button>
@@ -1630,6 +1770,13 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
             <span id="req-name-text">Untitled Request</span>
             <span style="font-size:9px;opacity:.4">✎</span>
           </div>
+          <select id="protocol-select" class="method-select" style="width:105px; border-right: 1px solid var(--border2);" onchange="updateProtocolUI(); markTabDirty()">
+            <option value="http">HTTP</option>
+            <option value="ws">WebSocket</option>
+            <option value="socketio">Socket.io</option>
+            <option value="mqtt">MQTT</option>
+            <option value="grpc">gRPC</option>
+          </select>
           <select id="method-select" class="method-select" onchange="updateMethodColor();markTabDirty()">
             <option>GET</option><option>POST</option><option>PUT</option>
             <option>PATCH</option><option>DELETE</option><option>HEAD</option><option>OPTIONS</option>
@@ -1646,8 +1793,10 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
           </div>
         </div>
 
-        <!-- Request section tabs -->
-        <div class="tab-bar">
+        <!-- HTTP Panel -->
+        <div id="http-panel" style="display:flex;flex-direction:column;flex:1;overflow:hidden">
+          <!-- Request section tabs -->
+          <div class="tab-bar">
           <div class="tab active" onclick="reqTab('params')" id="rt-params">Params <span class="tab-badge" id="tc-params">0</span></div>
           <div class="tab" onclick="reqTab('headers')" id="rt-headers">Headers <span class="tab-badge" id="tc-headers">0</span></div>
           <div class="tab" onclick="reqTab('body')" id="rt-body">Body</div>
@@ -1676,6 +1825,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
             <div class="body-type-bar">
               <button class="body-type-btn active" onclick="setBodyType('none')">none</button>
               <button class="body-type-btn" onclick="setBodyType('json')">JSON</button>
+              <button class="body-type-btn" onclick="setBodyType('graphql')">GraphQL</button>
               <button class="body-type-btn" onclick="setBodyType('raw')">raw</button>
               <button class="body-type-btn" onclick="setBodyType('form')">form-data</button>
               <button class="body-type-btn" onclick="setBodyType('urlencoded')">urlencoded</button>
@@ -1683,8 +1833,18 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
             </div>
             <div id="body-none-msg" style="color:var(--txt3);font-size:12px;font-family:var(--mono);padding:8px 0">This request does not have a body.</div>
             <div id="body-editor-wrap" style="display:none; position:relative; width:100%;">
+              <div class="body-editor-toolbar">
+                <span class="editor-hint"><kbd>Ctrl</kbd>+<kbd>/</kbd> comment • <kbd>Ctrl</kbd>+<kbd>B</kbd> beautify • <kbd>Tab</kbd> indent</span>
+              </div>
               <textarea class="code-editor" id="body-editor" style="position:relative; z-index:1; background:transparent; color:transparent; caret-color:var(--txt); white-space:pre;" placeholder="Enter request body…" spellcheck="false" oninput="markTabDirty(); updateBodyHighlight()" onscroll="document.getElementById('body-highlight-layer').scrollTop = this.scrollTop; document.getElementById('body-highlight-layer').scrollLeft = this.scrollLeft;" onkeydown="handleBodyKeydown(event)"></textarea>
-              <pre id="body-highlight-layer" class="code-editor" style="position:absolute; top:0; left:0; right:0; bottom:0; z-index:0; margin:0; pointer-events:none; white-space:pre; overflow:hidden; border-color:transparent; background:var(--bg2);"></pre>
+              <pre id="body-highlight-layer" class="code-editor" style="position:absolute; top:33px; left:0; right:0; bottom:0; z-index:0; margin:0; pointer-events:none; white-space:pre; overflow:hidden; border-color:transparent; background:var(--bg2);"></pre>
+              <div class="body-error-bar" id="body-error-bar"><span class="err-icon">✕</span><span class="err-msg" id="body-error-msg"></span></div>
+            </div>
+            <div id="body-graphql-wrap" style="display:none; width:100%;">
+              <div style="font-size:11px;font-weight:700;color:var(--txt3);margin-bottom:4px;text-transform:uppercase;">Query</div>
+              <textarea class="code-editor" id="graphql-query" style="min-height:140px; margin-bottom:12px; font-family:var(--mono);" placeholder="query { ... }" oninput="markTabDirty()"></textarea>
+              <div style="font-size:11px;font-weight:700;color:var(--txt3);margin-bottom:4px;text-transform:uppercase;">Variables (JSON)</div>
+              <textarea class="code-editor" id="graphql-vars" style="min-height:80px; font-family:var(--mono);" placeholder="{}" oninput="markTabDirty()"></textarea>
             </div>
             <div id="body-kv-wrap" style="display:none">
               <div class="kv-wrap"><table class="kv-table">
@@ -1720,6 +1880,9 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
           <div class="resp-topbar-right">
             <button class="copy-btn" id="copy-resp-btn" onclick="copyResponse()">Copy</button>
             <button class="copy-btn" onclick="downloadResponse()">Download</button>
+            <button class="resp-close-btn" id="resp-collapse-btn" onclick="toggleResponsePanel()" title="Toggle response panel">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
           </div>
         </div>
         <div class="tab-bar">
@@ -1728,6 +1891,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
           <div class="tab" onclick="respTab('cookies')" id="rst-cookies">Cookies</div>
           <div class="resp-view-bar" id="resp-view-bar" style="display:none">
             <button class="resp-view-btn active" onclick="setRespView('pretty')" id="rv-pretty">Pretty</button>
+            <button class="resp-view-btn" onclick="setRespView('tree')" id="rv-tree">Tree</button>
             <button class="resp-view-btn" onclick="setRespView('raw')" id="rv-raw">Raw</button>
             <button class="resp-view-btn" onclick="setRespView('preview')" id="rv-preview">Preview</button>
           </div>
@@ -1740,6 +1904,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
           <pre id="resp-body-content" style="display:none"></pre>
           <pre id="resp-body-raw" class="resp-raw-pre" style="display:none"></pre>
           <iframe id="resp-body-preview" class="resp-preview-iframe" style="display:none" sandbox="allow-same-origin"></iframe>
+          <div id="resp-body-tree" class="json-tree"></div>
         </div>
         <div class="resp-body" id="resp-headers-pane" style="display:none">
           <table class="resp-headers-table"><tbody id="resp-headers-tbody"></tbody></table>
@@ -1747,7 +1912,27 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
         <div class="resp-body" id="resp-cookies-pane" style="display:none">
           <table class="resp-headers-table"><tbody id="resp-cookies-tbody"></tbody></table>
         </div>
-      </div>
+      </div> <!-- End HTTP Panel -->
+
+      <!-- Realtime Panel -->
+      <div id="realtime-panel" style="display:none;flex-direction:column;flex:1;overflow:hidden;background:var(--bg0);">
+        <div style="padding:16px; border-bottom:1px solid var(--border); display:flex; gap:12px; align-items:center; background:var(--bg1);">
+          <div id="realtime-status-dot" style="width:10px;height:10px;border-radius:50%;background:var(--txt3);"></div>
+          <span id="realtime-status-text" style="font-size:12px;font-family:var(--mono);color:var(--txt2);font-weight:700;">Disconnected</span>
+          <button class="btn-primary" id="realtime-connect-btn" onclick="toggleRealtimeConnection()" style="margin-left:auto;">Connect</button>
+        </div>
+        <div id="realtime-config-bar" style="padding:12px 16px; border-bottom:1px solid var(--border); display:none; gap:10px; align-items:center;">
+          <!-- Socket.io / MQTT config like Event Name or Topic will go here -->
+        </div>
+        <div id="realtime-log" style="flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:8px; font-family:var(--mono); font-size:12px;">
+          <div style="color:var(--txt3);text-align:center;margin-top:20px;font-style:italic;">Enter a URL and connect to start session.</div>
+        </div>
+        <div style="padding:12px; border-top:1px solid var(--border); background:var(--bg1); display:flex; gap:8px;">
+          <textarea id="realtime-msg-input" class="code-editor" style="min-height:40px; height:60px; flex:1;" placeholder="Type message to send..."></textarea>
+          <button class="btn-primary" onclick="sendRealtimeMessage()" style="align-self:flex-end;">Send</button>
+        </div>
+      </div> <!-- End Realtime Panel -->
+
     </div>
 
     <!-- Environments View -->
@@ -1942,24 +2127,26 @@ let tabCounter = 0;
 function makeTabState(o={}) {
   return Object.assign({
     id:++tabCounter, name:'Untitled Request', savedReqId:null, dirty:false,
-    method:'GET', url:'', params:[], headers:[],
+    protocol:'http', method:'GET', url:'', params:[], headers:[],
     bodyType:'none', bodyContent:'', bodyKV:[],
     authType:'none', authData:{}, response:null,
+    isRequesting: false, abortController: null,
   }, o);
 }
 let tabs=[], activeTabIdx=-1;
-let currentAbortController=null;
 
 function currentTab(){ return tabs[activeTabIdx]||null; }
 
 function snapshotTab(){
   const t=currentTab(); if(!t) return;
+  t.protocol=document.getElementById('protocol-select').value;
   t.method=document.getElementById('method-select').value;
   t.url=document.getElementById('url-input').value;
   t.params=getKVRows('params-body');
   t.headers=getKVRows('headers-body');
   t.bodyType=S.bodyType;
   t.bodyContent=['json','raw'].includes(S.bodyType)?document.getElementById('body-editor').value:'';
+  if(S.bodyType==='graphql') t.bodyContent=JSON.stringify({query:document.getElementById('graphql-query').value,variables:document.getElementById('graphql-vars').value});
   t.bodyKV=['form','urlencoded'].includes(S.bodyType)?getFormRows():[];
   t.authType=document.getElementById('auth-type').value;
   t.authData=getAuthData();
@@ -1967,6 +2154,8 @@ function snapshotTab(){
 }
 
 function restoreTab(t){
+  document.getElementById('protocol-select').value=t.protocol||'http';
+  updateProtocolUI();
   document.getElementById('method-select').value=t.method;
   document.getElementById('url-input').value=t.url;
   document.getElementById('req-name-text').textContent=t.name;
@@ -1978,8 +2167,13 @@ function restoreTab(t){
   if(t.headers.length) t.headers.forEach(h=>addKVRow('headers',h.key,h.value,h.desc||'',h.enabled));
   else addKVRow('headers');
   S.bodyType=t.bodyType; setBodyType(t.bodyType);
-  document.getElementById('body-editor').value=t.bodyContent||'';
-  if(typeof updateBodyHighlight === 'function') updateBodyHighlight();
+  if(t.bodyType==='graphql'){
+    try{ const j=JSON.parse(t.bodyContent||'{}'); document.getElementById('graphql-query').value=j.query||''; document.getElementById('graphql-vars').value=j.variables||''; }
+    catch(e){ document.getElementById('graphql-query').value=''; document.getElementById('graphql-vars').value=''; }
+  } else {
+    document.getElementById('body-editor').value=t.bodyContent||'';
+    if(typeof updateBodyHighlight === 'function') updateBodyHighlight();
+  }
   document.getElementById('body-kv-body').innerHTML='';
   if(t.bodyKV&&t.bodyKV.length) t.bodyKV.forEach(r=>addFormRow(r.type||'text',r.key,r.value,r.fileName));
   document.getElementById('auth-type').value=t.authType;
@@ -1989,8 +2183,12 @@ function restoreTab(t){
   else if(t.authType==='bearer') setIV('auth-token',t.authData.token||'');
   else if(t.authType==='apikey'){ setIV('auth-key',t.authData.key||''); setIV('auth-value',t.authData.value||''); setIV('auth-location',t.authData.location||'header'); }
   if(t.response){ S.response=t.response; renderResponse(t.response); }
-  else { S.response=null; document.getElementById('resp-empty').style.display='flex'; document.getElementById('resp-body-content').style.display='none'; document.getElementById('resp-status-wrap').style.display='none'; }
+  else { S.response=null; document.getElementById('resp-empty').style.display='flex'; document.getElementById('resp-body-content').style.display='none'; document.getElementById('resp-status-wrap').style.display='none'; document.getElementById('resp-view-bar').style.display='none'; document.getElementById('resp-body-tree').style.display='none'; document.getElementById('resp-body-raw').style.display='none'; document.getElementById('resp-body-preview').style.display='none'; }
   updateTabBadge('params'); updateTabBadge('headers');
+  const btn=document.getElementById('send-btn');
+  const cancelBtn=document.getElementById('cancel-btn');
+  if(t.isRequesting){btn.innerHTML='<span class="spinner"></span>'; btn.disabled=true; cancelBtn.style.display='block';}
+  else{btn.innerHTML='Send'; btn.disabled=false; cancelBtn.style.display='none';}
 }
 function setIV(id,val){ const e=document.getElementById(id); if(e) e.value=val; }
 
@@ -2333,6 +2531,39 @@ function respTab(name){
   });
 }
 
+function updateProtocolUI() {
+  const protocol = document.getElementById('protocol-select').value;
+  const isReqRes = ['http', 'grpc'].includes(protocol);
+  
+  document.getElementById('http-panel').style.display = isReqRes ? 'flex' : 'none';
+  document.getElementById('realtime-panel').style.display = isReqRes ? 'none' : 'flex';
+  
+  const sendBtn = document.getElementById('send-btn');
+  const cancelBtn = document.getElementById('cancel-btn');
+  const methodSelect = document.getElementById('method-select');
+  
+  if (isReqRes) {
+    sendBtn.style.display = '';
+    methodSelect.style.display = protocol === 'http' ? '' : 'none'; // hide method for grpc
+    document.getElementById('realtime-config-bar').style.display = 'none';
+  } else {
+    sendBtn.style.display = 'none';
+    cancelBtn.style.display = 'none';
+    methodSelect.style.display = 'none';
+    // Show specific realtime config bars if needed
+    const configBar = document.getElementById('realtime-config-bar');
+    if (protocol === 'socketio') {
+      configBar.innerHTML = `<input type="text" class="url-input" id="sio-event" placeholder="Event Name (e.g. 'message')" style="width:200px">`;
+      configBar.style.display = 'flex';
+    } else if (protocol === 'mqtt') {
+      configBar.innerHTML = `<input type="text" class="url-input" id="mqtt-topic" placeholder="Topic (e.g. 'home/sensor')" style="width:200px">`;
+      configBar.style.display = 'flex';
+    } else {
+      configBar.style.display = 'none';
+    }
+  }
+}
+
 // ══════════════════════════════════════════════════════════
 //  KV ROWS
 // ══════════════════════════════════════════════════════════
@@ -2422,6 +2653,8 @@ function setBodyType(type){
   document.getElementById('body-none-msg').style.display=type==='none'?'block':'none';
   const ew = document.getElementById('body-editor-wrap');
   if(ew) ew.style.display=['json','raw'].includes(type)?'block':'none';
+  const gw = document.getElementById('body-graphql-wrap');
+  if(gw) gw.style.display=type==='graphql'?'block':'none';
   document.getElementById('beautify-btn').style.display=type==='json'?'':'none';
   document.getElementById('body-kv-wrap').style.display=['form','urlencoded'].includes(type)?'block':'none';
   if(type==='json'&&!document.getElementById('body-editor').value.trim()){
@@ -2662,6 +2895,21 @@ document.addEventListener('click',function(e){
 },true);
 
 // ══════════════════════════════════════════════════════════
+//  JSON COMMENT STRIPPING
+// ══════════════════════════════════════════════════════════
+function stripJsonComments(str){
+  let result='',i=0,inStr=false;
+  while(i<str.length){
+    if(inStr){if(str[i]==='\\'){result+=str[i]+(str[i+1]||'');i+=2;continue;}if(str[i]==='"')inStr=false;result+=str[i];i++;}
+    else{if(str[i]==='"'){inStr=true;result+=str[i];i++;}
+    else if(str[i]==='/'&&str[i+1]==='/'){while(i<str.length&&str[i]!=='\n')i++;}
+    else if(str[i]==='/'&&str[i+1]==='*'){i+=2;while(i<str.length&&!(str[i]==='*'&&str[i+1]==='/'))i++;i+=2;}
+    else{result+=str[i];i++;}}
+  }
+  return result;
+}
+
+// ══════════════════════════════════════════════════════════
 //  JSON BEAUTIFY
 // ══════════════════════════════════════════════════════════
 function beautifyBody(){
@@ -2670,7 +2918,8 @@ function beautifyBody(){
   const val=editor.value.trim();
   if(!val){ toast('Body is empty','info'); return; }
   try {
-    const parsed=JSON.parse(val);
+    const stripped=stripJsonComments(val);
+    const parsed=JSON.parse(stripped);
     editor.value=JSON.stringify(parsed,null,2);
     markTabDirty();
     if(typeof updateBodyHighlight === 'function') updateBodyHighlight();
@@ -2687,11 +2936,12 @@ async function sendRequest(){
   const rawUrl=document.getElementById('url-input').value.trim();
   if(!rawUrl){toast('Enter a URL first','error');return;}
   const url=substituteVars(rawUrl);
+  const t=currentTab(); if(!t) return;
+  if(t.isRequesting) return;
+  t.isRequesting=true; t.abortController=new AbortController();
   const btn=document.getElementById('send-btn');
   const cancelBtn=document.getElementById('cancel-btn');
-  btn.innerHTML='<span class="spinner"></span>'; btn.disabled=true;
-  cancelBtn.style.display='block';
-  currentAbortController=new AbortController();
+  if(t===currentTab()){ btn.innerHTML='<span class="spinner"></span>'; btn.disabled=true; cancelBtn.style.display='block'; }
   const bodyType=S.bodyType;
   const authType=document.getElementById('auth-type').value;
   const authData=substituteAuthData(authType,getAuthData());
@@ -2710,30 +2960,41 @@ async function sendRequest(){
       });
       payload.body_content = JSON.stringify(textFields);
       fd.append('payload', JSON.stringify(payload));
-      const res=await fetch('/api/execute',{method:'POST',body:fd,signal:currentAbortController.signal});
+      const res=await fetch('/api/execute',{method:'POST',body:fd,signal:t.abortController.signal});
       result=await res.json();
     } else {
       let bodyContent='';
-      if(['json','raw'].includes(bodyType)) bodyContent=substituteVars(document.getElementById('body-editor').value);
+      if(['json','raw'].includes(bodyType)){
+        let raw=document.getElementById('body-editor').value;
+        if(bodyType==='json') raw=stripJsonComments(raw);
+        bodyContent=substituteVars(raw);
+      }
+      else if(bodyType==='graphql'){
+        const q=document.getElementById('graphql-query').value;
+        const v=document.getElementById('graphql-vars').value;
+        let varsObj={}; try{varsObj=JSON.parse(stripJsonComments(substituteVars(v))||'{}');}catch(e){}
+        bodyContent=JSON.stringify({query:substituteVars(q),variables:varsObj});
+      }
       else if(bodyType==='urlencoded'){ const kv=getFormRows(); const obj={}; kv.forEach(r=>{obj[substituteVars(r.key)]=substituteVars(r.value);}); bodyContent=JSON.stringify(obj); }
-      const payload={method:document.getElementById('method-select').value,url,params,headers,body_type:bodyType,body_content:bodyContent,auth_type:authType,auth_data:authData};
-      const res=await fetch('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:currentAbortController.signal});
+      const payload={method:document.getElementById('method-select').value,url,params,headers,body_type:bodyType,body_content:bodyContent,auth_type:authType,auth_data:authData,protocol:t.protocol};
+      const res=await fetch('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:t.abortController.signal});
       result=await res.json();
     }
-    S.response=result; const t=currentTab(); if(t) t.response=result;
-    renderResponse(result); loadHistory();
+    if(t) t.response=result;
+    if(t===currentTab()){ S.response=result; renderResponse(result); }
+    loadHistory();
   }catch(e){
-    if(e.name==='AbortError'){toast('Request cancelled','info');}
-    else{renderError(e.message);toast('Request failed: '+e.message,'error');}
+    if(e.name==='AbortError'){if(t===currentTab())toast('Request cancelled','info');}
+    else{if(t===currentTab()){renderError(e.message);toast('Request failed: '+e.message,'error');}}
   }finally{
-    btn.innerHTML='Send';btn.disabled=false;
-    cancelBtn.style.display='none';
-    currentAbortController=null;
+    if(t){t.isRequesting=false; t.abortController=null;}
+    if(t===currentTab()){btn.innerHTML='Send';btn.disabled=false;cancelBtn.style.display='none';}
   }
 }
 
 function cancelRequest(){
-  if(currentAbortController){currentAbortController.abort();currentAbortController=null;}
+  const t=currentTab();
+  if(t&&t.abortController){t.abortController.abort();t.abortController=null;t.isRequesting=false;}
 }
 
 function renderResponse(data){
@@ -2755,8 +3016,8 @@ function renderResponse(data){
   S._respPrettyHtml = (data.body_json!==null&&data.body_json!==undefined) ? syntaxHighlight(JSON.stringify(data.body_json,null,2)) : null;
   S._respRawText = data.body||'';
   S._respIsHtml = (data.headers||{})['Content-Type']?.includes('text/html') || (data.headers||{})['content-type']?.includes('text/html');
-  // Default to Pretty view
-  setRespView('pretty');
+  // Default to Pretty view (or Tree if JSON)
+  setRespView(data.body_json ? 'tree' : 'pretty');
   document.getElementById('resp-headers-tbody').innerHTML=Object.entries(data.headers||{}).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('');
   const cookies=data.cookies||{};
   document.getElementById('resp-cookies-tbody').innerHTML=Object.keys(cookies).length?Object.entries(cookies).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join(''):'<tr><td colspan="2" style="color:var(--txt3);font-size:12px;padding:12px">No cookies</td></tr>';
@@ -2764,13 +3025,15 @@ function renderResponse(data){
 
 function setRespView(mode){
   S._respViewMode=mode;
-  ['pretty','raw','preview'].forEach(v=>{
-    document.getElementById('rv-'+v).classList.toggle('active',v===mode);
+  ['pretty','tree','raw','preview'].forEach(v=>{
+    const el=document.getElementById('rv-'+v);
+    if(el) el.classList.toggle('active',v===mode);
   });
   const content=document.getElementById('resp-body-content');
   const rawPre=document.getElementById('resp-body-raw');
   const previewFrame=document.getElementById('resp-body-preview');
-  content.style.display='none'; rawPre.style.display='none'; previewFrame.style.display='none';
+  const treePane=document.getElementById('resp-body-tree');
+  content.style.display='none'; rawPre.style.display='none'; previewFrame.style.display='none'; treePane.style.display='none';
   if(mode==='pretty'){
     content.style.display='block';
     if(S._respPrettyHtml) content.innerHTML=S._respPrettyHtml;
@@ -2789,6 +3052,89 @@ function setRespView(mode){
       previewFrame.srcdoc=`<html><body style="background:#1a1b26;color:#c0caf5;font-family:monospace;font-size:13px;padding:16px;margin:0"><pre>${escHtml(rawBody)}</pre></body></html>`;
     }
     previewFrame.style.height=(previewFrame.closest('.resp-body')?.clientHeight-10||300)+'px';
+  } else if(mode==='tree'){
+    treePane.style.display='block';
+    if(S.response && S.response.body_json) {
+      treePane.innerHTML = renderJsonTree(S.response.body_json);
+    } else {
+      treePane.innerHTML = '<div style="color:var(--txt3);padding:10px">Not a valid JSON response.</div>';
+    }
+  }
+}
+
+function renderJsonTree(obj, isLast=true) {
+  let ln = 1;
+  function indent(n){ return n > 0 ? `<span style="display:inline-block;width:${n*1.6}ch"></span>` : ''; }
+
+  function build(val, depth, isLastItem) {
+    const cm = isLastItem ? '' : '<span class="jt-comma">,</span>';
+    if (val === null) return `<span class="j-null">null</span>${cm}`;
+    if (typeof val === 'boolean') return `<span class="j-bool">${val}</span>${cm}`;
+    if (typeof val === 'number') return `<span class="j-num">${val}</span>${cm}`;
+    if (typeof val === 'string') return `<span class="j-str">"${escHtml(val)}"</span>${cm}`;
+
+    if (Array.isArray(val)) {
+      if (val.length === 0) return `<span class="jt-bracket">[ ]</span>${cm}`;
+      const id = 'jtn_' + Math.random().toString(36).substr(2,9);
+      let res = `<span class="jt-toggle" onclick="toggleJsonNode('${id}')">\u25BC</span><span class="jt-bracket">[</span><span class="jt-ell" id="${id}_ell" style="display:none" onclick="toggleJsonNode('${id}')">${val.length} items</span><span class="jt-count" id="${id}_cnt" style="display:none"></span>`;
+      res += `<div id="${id}_ch" class="jt-children">`;
+      for(let i=0; i<val.length; i++){
+        const itemHtml = build(val[i], depth+1, i===val.length-1);
+        res += `<div class="jt-row"><span class="jt-ln">${++ln}</span>${indent(depth+1)}${itemHtml}</div>`;
+      }
+      res += `</div><div class="jt-row"><span class="jt-ln">${++ln}</span>${indent(depth)}<span class="jt-bracket">]</span>${cm}</div>`;
+      return res;
+    }
+
+    if (typeof val === 'object') {
+      const keys = Object.keys(val);
+      if (keys.length === 0) return `<span class="jt-bracket">{ }</span>${cm}`;
+      const id = 'jtn_' + Math.random().toString(36).substr(2,9);
+      let res = `<span class="jt-toggle" onclick="toggleJsonNode('${id}')">\u25BC</span><span class="jt-bracket">{</span><span class="jt-ell" id="${id}_ell" style="display:none" onclick="toggleJsonNode('${id}')">${keys.length} keys</span><span class="jt-count" id="${id}_cnt" style="display:none"></span>`;
+      res += `<div id="${id}_ch" class="jt-children">`;
+      for(let i=0; i<keys.length; i++){
+        const k = keys[i];
+        const vHtml = build(val[k], depth+1, i===keys.length-1);
+        res += `<div class="jt-row"><span class="jt-ln">${++ln}</span>${indent(depth+1)}<span class="j-key">"${escHtml(k)}"</span><span class="jt-colon">: </span>${vHtml}</div>`;
+      }
+      res += `</div><div class="jt-row"><span class="jt-ln">${++ln}</span>${indent(depth)}<span class="jt-bracket">}</span>${cm}</div>`;
+      return res;
+    }
+    return escHtml(String(val));
+  }
+
+  const rootHtml = build(obj, 0, true);
+  return `<div class="jt-row"><span class="jt-ln">1</span>${rootHtml}</div>`;
+}
+
+window.toggleJsonNode = function(id) {
+  const ch = document.getElementById(id+'_ch');
+  const ell = document.getElementById(id+'_ell');
+  if(!ch || !ell) return;
+  const parent = ch.parentElement;
+  const tgl = parent.querySelector('.jt-toggle');
+  if(ch.style.display==='none'){
+    ch.style.display=''; ell.style.display='none';
+    if(tgl){ tgl.classList.remove('closed'); tgl.textContent='\u25BC'; }
+    // show closing bracket row (next sibling of children div)
+    const closingRow = ch.nextElementSibling;
+    if(closingRow) closingRow.style.display='';
+  } else {
+    ch.style.display='none'; ell.style.display='inline-block';
+    if(tgl){ tgl.classList.add('closed'); tgl.textContent='\u25B6'; }
+    // hide closing bracket row
+    const closingRow = ch.nextElementSibling;
+    if(closingRow) closingRow.style.display='none';
+  }
+};
+
+function toggleResponsePanel(){
+  const panel = document.getElementById('response-panel');
+  const btn = document.getElementById('resp-collapse-btn');
+  const collapsed = panel.classList.toggle('collapsed');
+  if(btn){
+    const svg = btn.querySelector('svg');
+    if(svg) svg.style.transform = collapsed ? 'rotate(180deg)' : '';
   }
 }
 
@@ -2820,10 +3166,33 @@ function updateBodyHighlight() {
   const editor = document.getElementById('body-editor');
   const layer = document.getElementById('body-highlight-layer');
   if(!editor || !layer) return;
+  const errBar = document.getElementById('body-error-bar');
+  const errMsg = document.getElementById('body-error-msg');
   if(S.bodyType === 'json') {
     layer.innerHTML = syntaxHighlight(editor.value) + '<br>';
+    // Validate JSON
+    const val = editor.value.trim();
+    if(val) {
+      try {
+        JSON.parse(stripJsonComments(val));
+        editor.classList.remove('body-editor-invalid');
+        if(errBar) errBar.classList.remove('visible');
+      } catch(e) {
+        editor.classList.add('body-editor-invalid');
+        if(errBar && errMsg) {
+          const m = e.message.replace(/^JSON\.parse:\s*/,'');
+          errMsg.textContent = 'JSON Error: ' + m;
+          errBar.classList.add('visible');
+        }
+      }
+    } else {
+      editor.classList.remove('body-editor-invalid');
+      if(errBar) errBar.classList.remove('visible');
+    }
   } else {
     layer.textContent = editor.value + '\n';
+    editor.classList.remove('body-editor-invalid');
+    if(errBar) errBar.classList.remove('visible');
   }
 }
 
@@ -2907,6 +3276,11 @@ document.addEventListener('keydown', function(e) {
       e.preventDefault();
       const urlInput = document.getElementById('url-input');
       if (urlInput) { urlInput.focus(); urlInput.select(); }
+    }
+    // Ctrl+\ — Toggle Sidebar
+    else if (e.key === '\\') {
+      e.preventDefault();
+      toggleSidebar();
     }
   }
 
@@ -3506,9 +3880,165 @@ async function deleteEnv(id){
 }
 
 // ══════════════════════════════════════════════════════════
-//  RESIZE HANDLE
+//  REALTIME PROTOCOLS (WS, SOCKET.IO, MQTT)
 // ══════════════════════════════════════════════════════════
+function updateRealtimeStatus(text, connected) {
+  const dot = document.getElementById('realtime-status-dot');
+  const txt = document.getElementById('realtime-status-text');
+  const btn = document.getElementById('realtime-connect-btn');
+  txt.textContent = text;
+  if (connected) {
+    dot.style.background = 'var(--acc)';
+    dot.style.boxShadow = '0 0 8px var(--acc-glow)';
+    btn.textContent = 'Disconnect';
+    btn.style.background = 'var(--red)';
+    btn.style.borderColor = 'var(--red)';
+  } else {
+    dot.style.background = 'var(--txt3)';
+    dot.style.boxShadow = 'none';
+    btn.textContent = 'Connect';
+    btn.style.background = '';
+    btn.style.borderColor = '';
+  }
+}
+
+function appendRealtimeLog(msg, type) {
+  const log = document.getElementById('realtime-log');
+  const div = document.createElement('div');
+  div.style.padding = '6px 10px';
+  div.style.borderRadius = '4px';
+  div.style.wordBreak = 'break-all';
+  if (type === 'sys') {
+    div.style.background = 'var(--bg2)';
+    div.style.color = 'var(--txt3)';
+    div.textContent = 'ℹ️ ' + msg;
+  } else if (type === 'err') {
+    div.style.background = 'rgba(244,112,103,0.1)';
+    div.style.color = 'var(--red)';
+    div.textContent = '❌ ' + msg;
+  } else if (type === 'tx') {
+    div.style.background = 'rgba(0,212,255,0.1)';
+    div.style.color = 'var(--acc)';
+    div.textContent = '⬆ ' + msg;
+  } else {
+    div.style.background = 'var(--bg2)';
+    div.style.color = 'var(--txt)';
+    div.textContent = '⬇ ' + msg;
+  }
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function toggleRealtimeConnection() {
+  const t = currentTab(); if (!t) return;
+  const protocol = document.getElementById('protocol-select').value;
+  
+  if (t.realtimeClient) {
+    if (t.protocol === 'ws') t.realtimeClient.close();
+    else if (t.protocol === 'socketio') t.realtimeClient.disconnect();
+    else if (t.protocol === 'mqtt') t.realtimeClient.end();
+    
+    t.realtimeClient = null;
+    updateRealtimeStatus('Disconnected', false);
+    return;
+  }
+  
+  const rawUrl = document.getElementById('url-input').value.trim();
+  if (!rawUrl) { toast('Please enter a URL', 'error'); return; }
+  const url = substituteVars(rawUrl);
+  
+  updateRealtimeStatus('Connecting...', false);
+  document.getElementById('realtime-log').innerHTML = '';
+  t.protocol = protocol;
+  
+  try {
+    if (protocol === 'ws') {
+      const ws = new WebSocket(url);
+      ws.onopen = () => { updateRealtimeStatus('Connected', true); appendRealtimeLog('Connected to ' + url, 'sys'); };
+      ws.onmessage = (e) => { appendRealtimeLog(e.data, 'rx'); };
+      ws.onclose = () => { t.realtimeClient = null; updateRealtimeStatus('Disconnected', false); appendRealtimeLog('Disconnected', 'sys'); };
+      ws.onerror = (e) => { appendRealtimeLog('WebSocket Error', 'err'); };
+      t.realtimeClient = ws;
+    } else if (protocol === 'socketio') {
+      if (typeof io === 'undefined') { toast('Socket.io library not loaded', 'error'); updateRealtimeStatus('Disconnected', false); return; }
+      const socket = io(url);
+      socket.on('connect', () => { updateRealtimeStatus('Connected', true); appendRealtimeLog('Connected to ' + url, 'sys'); });
+      socket.on('disconnect', () => { t.realtimeClient = null; updateRealtimeStatus('Disconnected', false); appendRealtimeLog('Disconnected', 'sys'); });
+      socket.on('connect_error', (e) => { appendRealtimeLog('Connection Error: ' + e.message, 'err'); });
+      socket.onAny((event, ...args) => { appendRealtimeLog(`[${event}] ` + JSON.stringify(args), 'rx'); });
+      t.realtimeClient = socket;
+    } else if (protocol === 'mqtt') {
+      if (typeof mqtt === 'undefined') { toast('MQTT library not loaded', 'error'); updateRealtimeStatus('Disconnected', false); return; }
+      const client = mqtt.connect(url);
+      client.on('connect', () => { 
+        updateRealtimeStatus('Connected', true); 
+        appendRealtimeLog('Connected to ' + url, 'sys'); 
+        const topic = document.getElementById('mqtt-topic').value || '#';
+        client.subscribe(topic);
+        appendRealtimeLog('Subscribed to ' + topic, 'sys');
+      });
+      client.on('message', (topic, message) => { appendRealtimeLog(`[${topic}] ` + message.toString(), 'rx'); });
+      client.on('close', () => { t.realtimeClient = null; updateRealtimeStatus('Disconnected', false); appendRealtimeLog('Disconnected', 'sys'); });
+      client.on('error', (e) => { appendRealtimeLog('MQTT Error: ' + e.message, 'err'); });
+      t.realtimeClient = client;
+    }
+  } catch (e) {
+    updateRealtimeStatus('Disconnected', false);
+    appendRealtimeLog('Error: ' + e.message, 'err');
+  }
+}
+
+function sendRealtimeMessage() {
+  const t = currentTab(); if (!t || !t.realtimeClient) { toast('Not connected', 'error'); return; }
+  const input = document.getElementById('realtime-msg-input');
+  const msg = input.value;
+  if (!msg) return;
+  
+  const protocol = t.protocol;
+  try {
+    if (protocol === 'ws') {
+      t.realtimeClient.send(msg);
+      appendRealtimeLog(msg, 'tx');
+      input.value = '';
+    } else if (protocol === 'socketio') {
+      const ev = document.getElementById('sio-event').value || 'message';
+      let data = msg; try { data = JSON.parse(msg); } catch(e){}
+      t.realtimeClient.emit(ev, data);
+      appendRealtimeLog(`[${ev}] ` + msg, 'tx');
+      input.value = '';
+    } else if (protocol === 'mqtt') {
+      const topic = document.getElementById('mqtt-topic').value || 'test';
+      t.realtimeClient.publish(topic, msg);
+      appendRealtimeLog(`[${topic}] ` + msg, 'tx');
+      input.value = '';
+    }
+  } catch(e) {
+    appendRealtimeLog('Send Error: ' + e.message, 'err');
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+//  SIDEBAR TOGGLE & RESIZE + RESPONSE RESIZE
+// ══════════════════════════════════════════════════════════
+function toggleSidebar(){
+  const app=document.getElementById('app');
+  const collapsed=app.classList.toggle('sidebar-collapsed');
+  localStorage.setItem('requestlab_sidebar_collapsed', collapsed?'1':'0');
+}
+
 function setupResizeHandle(){
+  if(localStorage.getItem('requestlab_sidebar_collapsed')==='1') document.getElementById('app').classList.add('sidebar-collapsed');
+  const sbW=localStorage.getItem('requestlab_sidebar_width');
+  if(sbW) { document.getElementById('app').style.gridTemplateColumns=sbW+'px 1fr'; document.getElementById('sidebar-drag').style.left=(sbW-1)+'px'; }
+
+  // Sidebar drag
+  const sbDrag=document.getElementById('sidebar-drag');
+  let sbDragging=false, startX, startW;
+  sbDrag.addEventListener('mousedown',e=>{sbDragging=true;startX=e.clientX;startW=document.getElementById('sidebar').offsetWidth;sbDrag.classList.add('dragging');document.body.style.userSelect='none';});
+  document.addEventListener('mousemove',e=>{if(!sbDragging)return; const w=Math.max(200,Math.min(600,startW+(e.clientX-startX))); document.getElementById('app').style.gridTemplateColumns=w+'px 1fr'; sbDrag.style.left=(w-1)+'px';});
+  document.addEventListener('mouseup',()=>{if(sbDragging){sbDragging=false;sbDrag.classList.remove('dragging');document.body.style.userSelect=''; localStorage.setItem('requestlab_sidebar_width',document.getElementById('sidebar').offsetWidth);}});
+
+  // Response drag
   const handle=document.getElementById('resize-handle');
   const resp=document.getElementById('response-panel');
   let dragging=false,startY,startH;
