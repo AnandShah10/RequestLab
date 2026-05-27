@@ -1340,7 +1340,6 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 #main{display:flex;flex-direction:column;overflow:hidden;background:var(--bg0);position:relative}
 #view-builder,#view-environments{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
 #view-environments{display:none}
-
 /* ── Topbar ── */
 .logo-area{display:flex;align-items:center;gap:10px;padding:0 18px;width:260px;border-right:1px solid var(--border);height:100%;flex-shrink:0}
 .logo-mark{width:26px;height:26px;background:var(--acc);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#000;box-shadow:0 0 12px var(--acc-glow);flex-shrink:0}
@@ -2018,7 +2017,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
     </div>
 
     <!-- Environments View -->
-    <div id="view-environments" style="display:none;flex-direction:column;overflow:hidden;flex:1;height:100%">
+    <div id="view-environments" style="flex-direction:column;overflow:hidden;flex:1;height:100%">
       <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg1)">
         <div>
           <h2 style="font-size:14px;font-weight:700">Environments</h2>
@@ -2495,6 +2494,11 @@ function showApp(){
     document.getElementById('user-menu').style.display='none';
   }
   loadCollections(); loadHistory(); loadEnvironments(); loadGlobals();
+  
+  // Initialize: hide environment content, show builder content
+  const envView = document.getElementById('view-environments');
+  envView.querySelector('div:first-child').style.display = 'none';
+  document.getElementById('envs-panel').style.display = 'none';
 }
 
 async function loadGlobals(){
@@ -2620,9 +2624,31 @@ function toast(msg,type='info',dur=2800){
 // ══════════════════════════════════════════════════════════
 function switchView(v){
   document.querySelectorAll('.top-tab').forEach((t,i)=>t.classList.toggle('active',['builder','environments'][i]===v));
-  document.getElementById('view-builder').style.display=v==='builder'?'flex':'none';
-  document.getElementById('view-environments').style.display=v==='environments'?'flex':'none';
-  if(v==='environments') { loadEnvironments(); renderEnvironmentsView(); }
+  const builderView = document.getElementById('view-builder');
+  const envView = document.getElementById('view-environments');
+  
+  if(v==='environments') {
+    // Hide builder content, show builder container
+    document.getElementById('req-tabs-bar').style.display = 'none';
+    document.getElementById('request-panel').style.display = 'none';
+    
+    // Show environment content
+    envView.style.display = 'flex';
+    envView.querySelector('div:first-child').style.display = 'flex';
+    document.getElementById('envs-panel').style.display = 'block';
+    
+    console.log('Switching to environments view');
+    loadEnvironments(); 
+    setTimeout(() => renderEnvironmentsView(), 100);
+  } else {
+    // Show builder content
+    document.getElementById('req-tabs-bar').style.display = 'flex';
+    document.getElementById('request-panel').style.display = 'flex';
+    
+    // Hide environment content
+    envView.querySelector('div:first-child').style.display = 'none';
+    document.getElementById('envs-panel').style.display = 'none';
+  }
 }
 
 function sidebarTab(t){
@@ -4028,7 +4054,7 @@ function renderEnvironmentsView(){
       <div class="kv-wrap" style="margin-bottom:10px"><table class="kv-table">
         <thead><tr><th>Variable</th><th>Value</th><th style="width:36px"></th></tr></thead>
         <tbody id="env-vars-global">
-          ${gEntries.map(([k,v])=>`<tr><td><input class="kv-input" value="${esc(k)}" placeholder="variable_name"></td><td><input class="kv-input" value="${esc(String(v))}" placeholder="value"></td><td><button class="del-row-btn" onclick="this.closest('tr').remove()" style="opacity:1">✕</button></td></tr>`).join('')}
+          ${gEntries.length ? gEntries.map(([k,v])=>`<tr><td><input class="kv-input" value="${esc(k)}" placeholder="variable_name"></td><td><input class="kv-input" value="${esc(String(v))}" placeholder="value"></td><td><button class="del-row-btn" onclick="this.closest('tr').remove()" style="opacity:1">✕</button></td></tr>`).join('') : '<tr><td colspan="3" style="text-align:center;padding:20px;color:var(--txt3);font-size:12px">No global variables yet. Click "+ Add Variable" to get started.</td></tr>'}
         </tbody>
       </table></div>
       <div style="display:flex;gap:8px;align-items:center">
@@ -4038,7 +4064,7 @@ function renderEnvironmentsView(){
     </div>`;
 
   let html = gHtml;
-  if(S.environments.length){
+  if(S.environments && S.environments.length){
     html += S.environments.map(env=>{
       let vars={}; 
       try {
@@ -4055,7 +4081,7 @@ function renderEnvironmentsView(){
       <div class="kv-wrap" style="margin-bottom:10px"><table class="kv-table">
         <thead><tr><th>Variable</th><th>Initial Value</th><th style="width:36px"></th></tr></thead>
         <tbody id="env-vars-${env.id}">
-          ${entries.map(([k,v])=>`<tr><td><input class="kv-input" value="${esc(k)}" placeholder="variable_name"></td><td><input class="kv-input" value="${esc(String(v))}" placeholder="value"></td><td><button class="del-row-btn" onclick="this.closest('tr').remove()" style="opacity:1">✕</button></td></tr>`).join('')}
+          ${entries.length ? entries.map(([k,v])=>`<tr><td><input class="kv-input" value="${esc(k)}" placeholder="variable_name"></td><td><input class="kv-input" value="${esc(String(v))}" placeholder="value"></td><td><button class="del-row-btn" onclick="this.closest('tr').remove()" style="opacity:1">✕</button></td></tr>`).join('') : '<tr><td colspan="3" style="text-align:center;padding:20px;color:var(--txt3);font-size:12px">No variables yet. Click "+ Add Variable" to get started.</td></tr>'}
         </tbody>
       </table></div>
       <div style="display:flex;gap:8px;align-items:center">
@@ -4064,9 +4090,11 @@ function renderEnvironmentsView(){
       </div>
     </div>`;
     }).join('');
+  } else {
+    html += '<div style="text-align:center;padding:60px 20px;color:var(--txt3)"><p style="font-size:14px;margin:0">No environments created yet</p><p style="font-size:12px;margin-top:8px">Click "+ New Environment" to create your first environment</p></div>';
   }
   panel.innerHTML = html;
-  } catch(e) { console.error('renderEnvironmentsView error:', e); }
+  } catch(e) { console.error('renderEnvironmentsView error:', e); console.error(e.stack); }
 }
 
 function addEnvVar(id){
