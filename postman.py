@@ -45,6 +45,112 @@ SMTP_CONFIG = {
     "sender": os.environ.get("SMTP_SENDER", "noreply@requestlab.com").strip('"').strip("'")
 }
 
+# ─── Script Execution Engine ─────────────────────────────────────────────────
+
+class AssertionBuilder:
+    """Builder for assertions similar to Postman's expect API"""
+    def __init__(self, name, value, assertions_list):
+        self.name = name
+        self.value = value
+        self.assertions = assertions_list
+    
+    def to_equal(self, expected):
+        passed = self.value == expected
+        self.assertions.append({"name": self.name, "passed": passed, "expected": expected, "actual": self.value})
+        return self
+    
+    def to_be_truthy(self):
+        passed = bool(self.value)
+        self.assertions.append({"name": self.name, "passed": passed, "actual": self.value})
+        return self
+    
+    def to_exist(self):
+        passed = self.value is not None
+        self.assertions.append({"name": self.name, "passed": passed, "actual": self.value})
+        return self
+    
+    def to_contain(self, substring):
+        passed = substring in str(self.value)
+        self.assertions.append({"name": self.name, "passed": passed, "expected": substring, "actual": self.value})
+        return self
+    
+    def to_have_status(self, status_code):
+        passed = self.value == status_code
+        self.assertions.append({"name": self.name, "passed": passed, "expected": status_code, "actual": self.value})
+        return self
+
+class PostmanLikeAPI:
+    """Implements pm.* API similar to Postman for scripting"""
+    def __init__(self, context):
+        self.environment = EnvironmentAPI(context.get("environment", {}))
+        self.globals = GlobalsAPI(context.get("globals", {}))
+        self.request = context.get("request", {})
+        self.response = context.get("response", {})
+        self.assertions = context.get("assertions", [])
+    
+    def expect(self, name, value=None):
+        """Create an expectation/ assertion"""
+        return AssertionBuilder(name, value, self.assertions)
+    
+    def test(self, name, test_fn):
+        """Run a test function and record result"""
+        try:
+            result = test_fn()
+            self.assertions.append({"name": name, "passed": bool(result)})
+        except Exception as e:
+            self.assertions.append({"name": name, "passed": False, "error": str(e)})
+
+class EnvironmentAPI:
+    """Environment variables API"""
+    def __init__(self, vars_dict):
+        self._vars = vars_dict if isinstance(vars_dict, dict) else {}
+    
+    def get(self, key, default=None):
+        return self._vars.get(key, default)
+    
+    def set(self, key, value):
+        self._vars[key] = value
+    
+    def unset(self, key):
+        self._vars.pop(key, None)
+
+class GlobalsAPI:
+    """Global variables API"""
+    def __init__(self, vars_dict):
+        self._vars = vars_dict if isinstance(vars_dict, dict) else {}
+    
+    def get(self, key, default=None):
+        return self._vars.get(key, default)
+    
+    def set(self, key, value):
+        self._vars[key] = value
+    
+    def unset(self, key):
+        self._vars.pop(key, None)
+
+def execute_python_script(script, context):
+    """Execute Python pre-request/test script with safe context"""
+    if not script or not script.strip():
+        return context
+    
+    try:
+        pm = PostmanLikeAPI(context)
+        safe_globals = {"__builtins__": {"len": len, "str": str, "int": int, "float": float, 
+                                          "bool": bool, "dict": dict, "list": list, 
+                                          "print": print, "range": range, "isinstance": isinstance}}
+        safe_locals = {"pm": pm}
+        exec(script, safe_globals, safe_locals)
+        
+        # Update context with modified environment/globals
+        context["environment"] = pm.environment._vars
+        context["globals"] = pm.globals._vars
+        context["assertions"] = pm.assertions
+    except Exception as e:
+        context["script_error"] = str(e)
+    
+    return context
+
+
 # ─── Database Setup ───────────────────────────────────────────────────────────
 
 def get_db():
@@ -148,6 +254,47 @@ def init_db():
             conn.commit()
         except Exception:
             pass
+        
+        # Migration: add script columns to requests
+        try:
+            conn.execute("ALTER TABLE requests ADD COLUMN pre_request_script TEXT DEFAULT ''")
+            conn.execute("ALTER TABLE requests ADD COLUMN test_script TEXT DEFAULT ''")
+            conn.execute("ALTER TABLE requests ADD COLUMN script_language TEXT DEFAULT 'javascript'")
+            conn.commit()
+        except Exception:
+            pass
+        
+        # Create mock_endpoints table
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS mock_endpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                method TEXT DEFAULT 'GET',
+                response_body TEXT DEFAULT '{}',
+                content_type TEXT DEFAULT 'application/json',
+                status_code INTEGER DEFAULT 200,
+                delay_ms INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
+                created TEXT DEFAULT (datetime('now'))
+            );
+        """)
+        
+        # Create collection_runs table
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS collection_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                collection_id INTEGER REFERENCES collections(id) ON DELETE CASCADE,
+                iterations INTEGER DEFAULT 1,
+                status TEXT DEFAULT 'running',
+                start_time TEXT DEFAULT (datetime('now')),
+                end_time TEXT,
+                total_requests INTEGER DEFAULT 0,
+                passed INTEGER DEFAULT 0,
+                failed INTEGER DEFAULT 0
+            );
+        """)
 
         # Migration: add avatar_color to users if missing
         try:
@@ -402,6 +549,76 @@ def update_globals():
         conn.execute("UPDATE users SET global_vars=? WHERE id=?", (vars_str, uid))
     return jsonify({"ok": True})
 
+# ─── Mock Server ──────────────────────────────────────────────────────────────
+
+@app.route("/api/mocks", methods=["GET"])
+def list_mocks():
+    uid = get_current_user_id()
+    with get_db() as conn:
+        if uid:
+            rows = conn.execute("SELECT * FROM mock_endpoints WHERE user_id=? ORDER BY created DESC", (uid,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM mock_endpoints WHERE user_id IS NULL ORDER BY created DESC").fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/mocks", methods=["POST"])
+def create_mock():
+    uid = get_current_user_id()
+    d = request.json or {}
+    path = d.get("path", "/mock-endpoint")
+    method = d.get("method", "GET").upper()
+    response_body = d.get("response_body", "{}")
+    content_type = d.get("content_type", "application/json")
+    status_code = d.get("status_code", 200)
+    delay_ms = d.get("delay_ms", 0)
+    
+    with get_db() as conn:
+        mid = conn.execute(
+            "INSERT INTO mock_endpoints (path,method,response_body,content_type,status_code,delay_ms,user_id) VALUES (?,?,?,?,?,?,?)",
+            (path, method, response_body, content_type, status_code, delay_ms, uid)
+        ).lastrowid
+    return jsonify({"id": mid, "ok": True})
+
+@app.route("/api/mocks/<int:mid>", methods=["PUT"])
+def update_mock(mid):
+    d = request.json or {}
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE mock_endpoints SET path=?,method=?,response_body=?,content_type=?,status_code=?,delay_ms=?,enabled=? WHERE id=?",
+            (d.get("path"), d.get("method"), d.get("response_body"), d.get("content_type"),
+             d.get("status_code", 200), d.get("delay_ms", 0), d.get("enabled", 1), mid)
+        )
+    return jsonify({"ok": True})
+
+@app.route("/api/mocks/<int:mid>", methods=["DELETE"])
+def delete_mock(mid):
+    with get_db() as conn:
+        conn.execute("DELETE FROM mock_endpoints WHERE id=?", (mid,))
+    return jsonify({"ok": True})
+
+@app.route("/mock/<path:path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+def serve_mock(path):
+    method = request.method
+    with get_db() as conn:
+        mock = conn.execute(
+            "SELECT * FROM mock_endpoints WHERE path=? AND method=? AND enabled=1",
+            (path, method)
+        ).fetchone()
+    
+    if not mock:
+        return jsonify({"error": "Mock endpoint not found"}), 404
+    
+    # Apply delay
+    if mock["delay_ms"] > 0:
+        time.sleep(mock["delay_ms"] / 1000.0)
+    
+    return Response(
+        mock["response_body"],
+        status=mock["status_code"],
+        content_type=mock["content_type"]
+    )
+
+
 # ─── Proxy / Execute Request ──────────────────────────────────────────────────
 
 @app.route("/api/execute", methods=["POST"])
@@ -485,6 +702,47 @@ def execute_request():
         for k, v in request.files.items():
             if k.startswith("file_"):
                 req_files[k[5:]] = (v.filename, v.stream.read(), v.mimetype)
+    
+    # Get script and environment data
+    pre_request_script = data.get("pre_request_script", "")
+    test_script = data.get("test_script", "")
+    script_language = data.get("script_language", "javascript")
+    
+    # Load active environment variables
+    env_vars = {}
+    global_vars = {}
+    uid = get_current_user_id()
+    with get_db() as conn:
+        active_env = conn.execute("SELECT vars FROM environments WHERE user_id=? AND active=1", (uid,)).fetchone()
+        if active_env and active_env["vars"]:
+            try:
+                env_vars = json.loads(active_env["vars"]) if isinstance(active_env["vars"], str) else active_env["vars"]
+            except:
+                env_vars = {}
+        
+        user_row = conn.execute("SELECT global_vars FROM users WHERE id=?", (uid,)).fetchone()
+        if user_row and user_row["global_vars"]:
+            try:
+                global_vars = json.loads(user_row["global_vars"]) if isinstance(user_row["global_vars"], str) else user_row["global_vars"]
+            except:
+                global_vars = {}
+    
+    # Execute pre-request script (Python only for server-side)
+    if pre_request_script and script_language == "python":
+        pre_context = {
+            "request": {"method": method, "url": url, "headers": headers, "params": params},
+            "environment": env_vars.copy(),
+            "globals": global_vars.copy(),
+            "assertions": []
+        }
+        pre_context = execute_python_script(pre_request_script, pre_context)
+        env_vars = pre_context.get("environment", env_vars)
+        global_vars = pre_context.get("globals", global_vars)
+        # Update headers/params if script modified them
+        if "modified_headers" in pre_context:
+            headers.update(pre_context["modified_headers"])
+        if "modified_params" in pre_context:
+            params.update(pre_context["modified_params"])
 
     start = time.time()
     try:
@@ -537,6 +795,30 @@ def execute_request():
             "body": resp_body, "body_json": resp_json,
             "url": resp.url, "redirects": len(resp.history),
         }
+        
+        # Execute test script (Python only for server-side)
+        if test_script and script_language == "python":
+            test_context = {
+                "request": {"method": method, "url": url},
+                "response": result,
+                "environment": env_vars.copy(),
+                "globals": global_vars.copy(),
+                "assertions": []
+            }
+            test_context = execute_python_script(test_script, test_context)
+            result["test_results"] = test_context.get("assertions", [])
+            result["script_error"] = test_context.get("script_error")
+            # Update environment/globals if modified
+            if test_context.get("environment") != env_vars:
+                # Save updated environment to DB
+                try:
+                    with get_db() as conn:
+                        conn.execute("UPDATE environments SET vars=? WHERE user_id=? AND active=1",
+                                   (json.dumps(test_context["environment"]), uid))
+                except:
+                    pass
+        else:
+            result["test_results"] = []
         with get_db() as conn:
             conn.execute(
                 "INSERT INTO history (user_id,method,url,status_code,duration_ms,request_data,response_data) VALUES (?,?,?,?,?,?,?)",
@@ -552,6 +834,187 @@ def execute_request():
         return jsonify({"error": f"SSL error: {e}"}), 502
     except Exception as e:
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+# ─── Collection Runner ───────────────────────────────────────────────────────
+
+@app.route("/api/runner/execute", methods=["POST"])
+def execute_collection_runner():
+    """Execute all requests in a collection sequentially"""
+    uid = require_auth() or get_current_user_id()
+    data = request.json or {}
+    collection_id = data.get("collection_id")
+    iterations = data.get("iterations", 1)
+    delay_ms = data.get("delay_ms", 0)
+    
+    if not collection_id:
+        return jsonify({"error": "collection_id is required"}), 400
+    
+    with get_db() as conn:
+        requests_list = conn.execute(
+            "SELECT * FROM requests WHERE collection_id=? ORDER BY id",
+            (collection_id,)
+        ).fetchall()
+        
+        if not requests_list:
+            return jsonify({"error": "No requests found in collection"}), 404
+        
+        run_id = conn.execute(
+            "INSERT INTO collection_runs (user_id,collection_id,iterations,total_requests) VALUES (?,?,?,?)",
+            (uid, collection_id, iterations, len(requests_list))
+        ).lastrowid
+    
+    results = []
+    total_passed = 0
+    total_failed = 0
+    
+    env_vars = {}
+    global_vars = {}
+    with get_db() as conn:
+        active_env = conn.execute("SELECT vars FROM environments WHERE user_id=? AND active=1", (uid,)).fetchone()
+        if active_env and active_env["vars"]:
+            try:
+                env_vars = json.loads(active_env["vars"]) if isinstance(active_env["vars"], str) else active_env["vars"]
+            except:
+                pass
+        
+        user_row = conn.execute("SELECT global_vars FROM users WHERE id=?", (uid,)).fetchone()
+        if user_row and user_row["global_vars"]:
+            try:
+                global_vars = json.loads(user_row["global_vars"]) if isinstance(user_row["global_vars"], str) else user_row["global_vars"]
+            except:
+                pass
+    
+    for iteration in range(iterations):
+        for req in requests_list:
+            req_data = {
+                "method": req["method"],
+                "url": req["url"],
+                "params": json.loads(req["params"]) if req["params"] else [],
+                "headers": json.loads(req["headers"]) if req["headers"] else [],
+                "body_type": req["body_type"],
+                "body_content": req["body_content"],
+                "auth_type": req["auth_type"],
+                "auth_data": json.loads(req["auth_data"]) if req["auth_data"] else {},
+                "pre_request_script": req["pre_request_script"] if req["pre_request_script"] else "",
+                "test_script": req["test_script"] if req["test_script"] else "",
+                "script_language": req["script_language"] if req["script_language"] else "javascript",
+            }
+            
+            try:
+                result = execute_single_request(req_data, env_vars, global_vars)
+                results.append({
+                    "request_name": req["name"],
+                    "request_id": req["id"],
+                    "iteration": iteration + 1,
+                    **result
+                })
+                
+                test_results = result.get("test_results", [])
+                for test in test_results:
+                    if test.get("passed"):
+                        total_passed += 1
+                    else:
+                        total_failed += 1
+                
+                if "updated_env" in result:
+                    env_vars = result["updated_env"]
+                
+                if delay_ms > 0:
+                    time.sleep(delay_ms / 1000.0)
+            except Exception as e:
+                results.append({
+                    "request_name": req["name"],
+                    "request_id": req["id"],
+                    "iteration": iteration + 1,
+                    "error": str(e)
+                })
+    
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE collection_runs SET status='completed',end_time=datetime('now'),passed=?,failed=? WHERE id=?",
+            (total_passed, total_failed, run_id)
+        )
+    
+    return jsonify({
+        "run_id": run_id,
+        "results": results,
+        "summary": {
+            "total_requests": len(results),
+            "total_passed": total_passed,
+            "total_failed": total_failed
+        }
+    })
+
+def execute_single_request(req_data, env_vars, global_vars):
+    """Execute a single request with scripts (used by runner)"""
+    method = req_data["method"]
+    url = req_data["url"]
+    params = {p["key"]: p["value"] for p in req_data.get("params", []) if p.get("key") and p.get("enabled", True)}
+    headers = {h["key"]: h["value"] for h in req_data.get("headers", []) if h.get("key") and h.get("enabled", True)}
+    
+    if req_data.get("pre_request_script") and req_data.get("script_language") == "python":
+        pre_context = {
+            "request": {"method": method, "url": url},
+            "environment": env_vars.copy(),
+            "globals": global_vars.copy(),
+            "assertions": []
+        }
+        pre_context = execute_python_script(req_data["pre_request_script"], pre_context)
+        env_vars = pre_context.get("environment", env_vars)
+    
+    body_type = req_data.get("body_type", "none")
+    body_content = req_data.get("body_content", "")
+    req_json = None
+    req_body = None
+    
+    if body_type in ("json", "graphql"):
+        try:
+            req_json = json.loads(body_content) if body_content.strip() else None
+            headers.setdefault("Content-Type", "application/json")
+        except:
+            pass
+    elif body_type in ("raw", "xml", "soap"):
+        req_body = body_content.encode("utf-8")
+    
+    start = time.time()
+    resp = requests.request(
+        method=method, url=url, params=params, headers=headers,
+        json=req_json, data=req_body,
+        timeout=30, allow_redirects=True, verify=True,
+    )
+    duration_ms = (time.time() - start) * 1000
+    
+    try:
+        resp_body = resp.text
+    except:
+        resp_body = "<binary>"
+    
+    resp_json = None
+    try:
+        resp_json = resp.json()
+    except:
+        pass
+    
+    result = {
+        "status_code": resp.status_code,
+        "duration_ms": round(duration_ms, 2),
+        "test_results": []
+    }
+    
+    if req_data.get("test_script") and req_data.get("script_language") == "python":
+        test_context = {
+            "request": {"method": method, "url": url},
+            "response": result,
+            "environment": env_vars.copy(),
+            "globals": global_vars.copy(),
+            "assertions": []
+        }
+        test_context = execute_python_script(req_data["test_script"], test_context)
+        result["test_results"] = test_context.get("assertions", [])
+        result["updated_env"] = test_context.get("environment", env_vars)
+    
+    return result
 
 
 # ─── Collections ──────────────────────────────────────────────────────────────
@@ -1338,8 +1801,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 #topbar{grid-column:1/-1;display:flex;align-items:center;background:var(--bg1);border-bottom:1px solid var(--border);z-index:20;padding:0}
 #sidebar{background:var(--bg1);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
 #main{display:flex;flex-direction:column;overflow:hidden;background:var(--bg0);position:relative}
-#view-builder,#view-environments{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
-#view-environments{display:none}
+#view-builder,#view-environments,#view-mocks,#view-runner{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
 /* ── Topbar ── */
 .logo-area{display:flex;align-items:center;gap:10px;padding:0 18px;width:260px;border-right:1px solid var(--border);height:100%;flex-shrink:0}
 .logo-mark{width:26px;height:26px;background:var(--acc);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#000;box-shadow:0 0 12px var(--acc-glow);flex-shrink:0}
@@ -1713,6 +2175,81 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .jt-children{margin-left:4px;padding-left:16px;border-left:1px solid var(--border)}
 .jt-children:hover{border-left-color:var(--acc-dim)}
 #resp-body-tree{display:none;overflow:auto;padding:12px 20px}
+/* ── Responsive Design ── */
+@media (max-width: 768px) {
+  #app {
+    grid-template-columns: 1fr !important;
+  }
+  
+  #sidebar {
+    display: none !important;
+  }
+  
+  #sidebar.sidebar-open {
+    display: flex !important;
+    position: fixed;
+    left: 0;
+    top: 52px;
+    bottom: 0;
+    width: 280px;
+    z-index: 100;
+    box-shadow: 2px 0 8px rgba(0,0,0,0.3);
+  }
+  
+  .logo-area {
+    width: auto !important;
+    padding: 0 12px;
+  }
+  
+  .top-nav {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  
+  .top-tab {
+    white-space: nowrap;
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+  
+  .env-card {
+    padding: 12px;
+  }
+  
+  .kv-table {
+    font-size: 10px;
+  }
+  
+  .kv-input {
+    font-size: 10px;
+    padding: 4px 6px;
+  }
+}
+
+@media (max-width: 480px) {
+  .logo-text {
+    display: none;
+  }
+  
+  .top-tab {
+    padding: 5px 8px;
+    font-size: 10px;
+  }
+  
+  .env-card-header {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  
+  .btn-primary {
+    padding: 6px 12px;
+    font-size: 11px;
+  }
+}
+.env-card-content {
+  transition: max-height 0.3s ease-out;
+  overflow: hidden;
+}
 </style>
 </head>
 <body>
@@ -1784,6 +2321,8 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
     <div class="top-nav">
       <button class="top-tab active" onclick="switchView('builder')">Request Builder</button>
       <button class="top-tab" onclick="switchView('environments')">Environments</button>
+      <button class="top-tab" onclick="switchView('mocks')">Mock Server</button>
+      <button class="top-tab" onclick="switchView('runner')">Runner</button>
     </div>
     <div class="top-right">
       <button class="icon-btn" onclick="toggleTheme()" title="Toggle Theme" id="theme-btn" style="border:none;font-size:16px;">☀️</button>
@@ -2017,7 +2556,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
     </div>
 
     <!-- Environments View -->
-    <div id="view-environments" style="flex-direction:column;overflow:hidden;flex:1;height:100%">
+    <div id="view-environments" style="flex-direction:column;overflow:hidden;flex:1;min-height:0">
       <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg1)">
         <div>
           <h2 style="font-size:14px;font-weight:700">Environments</h2>
@@ -2026,6 +2565,51 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
         <button class="btn-primary" onclick="createEnvironment()">+ New Environment</button>
       </div>
       <div id="envs-panel" style="overflow-y:auto;padding:16px;flex:1"></div>
+    </div>
+    
+    <!-- Mock Server View -->
+    <div id="view-mocks" style="flex-direction:column;overflow:hidden;flex:1;min-height:0">
+      <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg1)">
+        <div>
+          <h2 style="font-size:14px;font-weight:700">Mock Server</h2>
+          <p style="font-size:11px;color:var(--txt3);margin-top:2px">Base URL: <code style="font-family:var(--mono);color:var(--acc)">http://localhost:5000/mock/</code></p>
+        </div>
+        <button class="btn-primary" onclick="createMockEndpoint()">+ New Mock</button>
+      </div>
+      <div id="mocks-panel" style="overflow-y:auto;padding:16px;flex:1"></div>
+    </div>
+    
+    <!-- Collection Runner View -->
+    <div id="view-runner" style="flex-direction:column;overflow:hidden;flex:1;min-height:0">
+      <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg1)">
+        <div>
+          <h2 style="font-size:14px;font-weight:700">Collection Runner</h2>
+          <p style="font-size:11px;color:var(--txt3);margin-top:2px">Run collections with iterations and delays</p>
+        </div>
+      </div>
+      <div id="runner-panel" style="overflow-y:auto;padding:16px;flex:1">
+        <div style="max-width:600px;margin:0 auto">
+          <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-xl);padding:20px;margin-bottom:20px">
+            <h3 style="font-size:13px;font-weight:700;margin-bottom:12px">Run Configuration</h3>
+            <div style="margin-bottom:12px">
+              <label style="font-size:11px;color:var(--txt3);display:block;margin-bottom:4px">Select Collection</label>
+              <select id="runner-collection" class="kv-input" style="width:100%;padding:8px"></select>
+            </div>
+            <div style="display:flex;gap:12px;margin-bottom:12px">
+              <div style="flex:1">
+                <label style="font-size:11px;color:var(--txt3);display:block;margin-bottom:4px">Iterations</label>
+                <input id="runner-iterations" type="number" class="kv-input" value="1" min="1" max="100" style="width:100%;padding:8px">
+              </div>
+              <div style="flex:1">
+                <label style="font-size:11px;color:var(--txt3);display:block;margin-bottom:4px">Delay (ms)</label>
+                <input id="runner-delay" type="number" class="kv-input" value="0" min="0" style="width:100%;padding:8px">
+              </div>
+            </div>
+            <button class="btn-primary" onclick="runCollection()" style="width:100%">Run Collection</button>
+          </div>
+          <div id="runner-results" style="display:none"></div>
+        </div>
+      </div>
     </div>
   </main>
 </div>
@@ -2494,11 +3078,16 @@ function showApp(){
     document.getElementById('user-menu').style.display='none';
   }
   loadCollections(); loadHistory(); loadEnvironments(); loadGlobals();
+  S.mocks = [];
   
-  // Initialize: hide environment content, show builder content
+  // Initialize: hide all views except builder
   const envView = document.getElementById('view-environments');
-  envView.querySelector('div:first-child').style.display = 'none';
-  document.getElementById('envs-panel').style.display = 'none';
+  const mocksView = document.getElementById('view-mocks');
+  const runnerView = document.getElementById('view-runner');
+  
+  if(envView) envView.style.display = 'none';
+  if(mocksView) mocksView.style.display = 'none';
+  if(runnerView) runnerView.style.display = 'none';
 }
 
 async function loadGlobals(){
@@ -2623,31 +3212,46 @@ function toast(msg,type='info',dur=2800){
 //  VIEW / SIDEBAR SWITCHING
 // ══════════════════════════════════════════════════════════
 function switchView(v){
-  document.querySelectorAll('.top-tab').forEach((t,i)=>t.classList.toggle('active',['builder','environments'][i]===v));
+  const views = ['builder','environments','mocks','runner'];
+  document.querySelectorAll('.top-tab').forEach((t,i)=>t.classList.toggle('active',views[i]===v));
   const builderView = document.getElementById('view-builder');
   const envView = document.getElementById('view-environments');
+  const mocksView = document.getElementById('view-mocks');
+  const runnerView = document.getElementById('view-runner');
   
-  if(v==='environments') {
-    // Hide builder content, show builder container
-    document.getElementById('req-tabs-bar').style.display = 'none';
-    document.getElementById('request-panel').style.display = 'none';
-    
-    // Show environment content
-    envView.style.display = 'flex';
-    envView.querySelector('div:first-child').style.display = 'flex';
-    document.getElementById('envs-panel').style.display = 'block';
-    
-    console.log('Switching to environments view');
-    loadEnvironments(); 
-    setTimeout(() => renderEnvironmentsView(), 100);
-  } else {
-    // Show builder content
+  // Hide all views
+  // Show selected view
+  if(v==='builder') {
+    envView.style.display = 'none';
+    mocksView.style.display = 'none';
+    runnerView.style.display = 'none';
     document.getElementById('req-tabs-bar').style.display = 'flex';
     document.getElementById('request-panel').style.display = 'flex';
+  } else if(v==='environments') {
+    envView.style.display = 'flex';
+    mocksView.style.display = 'none';
+    runnerView.style.display = 'none';
+    envView.querySelector('div:first-child').style.display = 'flex';
+    document.getElementById('envs-panel').style.display = 'block';
+    document.getElementById('req-tabs-bar').style.display = 'none';
+    document.getElementById('request-panel').style.display = 'none';
+    loadEnvironments(); 
+    setTimeout(() => renderEnvironmentsView(), 100);
+  } else if(v==='mocks') {
+    mocksView.style.display = 'flex';
+    envView.style.display = 'none';
+    runnerView.style.display = 'none';
     
-    // Hide environment content
-    envView.querySelector('div:first-child').style.display = 'none';
-    document.getElementById('envs-panel').style.display = 'none';
+    document.getElementById('req-tabs-bar').style.display = 'none';
+    document.getElementById('request-panel').style.display = 'none';
+    loadMocks();
+  } else if(v==='runner') {
+    runnerView.style.display = 'flex';
+    envView.style.display = 'none';
+    mocksView.style.display = 'none';
+    document.getElementById('req-tabs-bar').style.display = 'none';
+    document.getElementById('request-panel').style.display = 'none';
+    loadRunnerCollections();
   }
 }
 
@@ -4047,10 +4651,12 @@ function renderEnvironmentsView(){
   
   const gEntries = Object.entries(gVars);
   let gHtml = `<div class="env-card" id="env-card-global">
-      <div class="env-card-header">
+      <div class="env-card-header" onclick="toggleCard('global')" style="cursor:pointer">
         <span style="font-weight:600;color:var(--acc)">Global Variables</span>
         <span class="env-active-badge">Always Active</span>
+        <span class="collapse-icon" id="collapse-icon-global" style="margin-left:auto;font-size:12px">▼</span>
       </div>
+      <div class="env-card-content" id="env-content-global">
       <div class="kv-wrap" style="margin-bottom:10px"><table class="kv-table">
         <thead><tr><th>Variable</th><th>Value</th><th style="width:36px"></th></tr></thead>
         <tbody id="env-vars-global">
@@ -4060,6 +4666,7 @@ function renderEnvironmentsView(){
       <div style="display:flex;gap:8px;align-items:center">
         <button class="add-row-btn" style="margin-top:0" onclick="addEnvVar('global')">+ Add Variable</button>
         <button class="env-save-btn" onclick="saveGlobals()">Save Globals</button>
+      </div>
       </div>
     </div>`;
 
@@ -4073,11 +4680,13 @@ function renderEnvironmentsView(){
       } catch(e){}
       const entries=Object.entries(vars);
       return `<div class="env-card" id="env-card-${env.id}">
-      <div class="env-card-header">
+      <div class="env-card-header" onclick="toggleCard(${env.id})" style="cursor:pointer">
+        <span class="collapse-icon" id="collapse-icon-${env.id}" style="margin-left:auto;font-size:12px">▼</span>
         <input class="env-name-input" value="${esc(env.name)}" id="en-${env.id}" placeholder="Environment name">
         ${env.active?'<span class="env-active-badge">● Active</span>':`<button class="activate-btn" onclick="activateEnv(${env.id})">Set Active</button>`}
         <button class="icon-btn" onclick="deleteEnv(${env.id})" style="margin-left:auto" title="Delete">🗑</button>
       </div>
+      <div class="env-card-content" id="env-content-${env.id}">
       <div class="kv-wrap" style="margin-bottom:10px"><table class="kv-table">
         <thead><tr><th>Variable</th><th>Initial Value</th><th style="width:36px"></th></tr></thead>
         <tbody id="env-vars-${env.id}">
@@ -4087,6 +4696,7 @@ function renderEnvironmentsView(){
       <div style="display:flex;gap:8px;align-items:center">
         <button class="add-row-btn" style="margin-top:0" onclick="addEnvVar(${env.id})">+ Add Variable</button>
         <button class="env-save-btn" onclick="saveEnv(${env.id})">Save Changes</button>
+      </div>
       </div>
     </div>`;
     }).join('');
@@ -4141,6 +4751,168 @@ async function deleteEnv(id){
   if(!confirm('Delete this environment?')) return;
   await fetch('/api/environments/'+id,{method:'DELETE'});
   await loadEnvironments(); toast('Environment deleted','info');
+}
+
+function toggleCard(id){
+  const content = document.getElementById(`env-content-${id}`);
+  const icon = document.getElementById(`collapse-icon-${id}`);
+  if(content && icon){
+    if(content.style.display === 'none'){
+      content.style.display = 'block';
+      icon.textContent = '▼';
+    } else {
+      content.style.display = 'none';
+      icon.textContent = '▶';
+    }
+  }
+}
+
+function toggleMockCard(id){
+  const content = document.getElementById(`mock-content-${id}`);
+  const icon = document.getElementById(`collapse-icon-mock-${id}`);
+  if(content && icon){
+    if(content.style.display === 'none'){
+      content.style.display = 'block';
+      icon.textContent = '▼';
+    } else {
+      content.style.display = 'none';
+      icon.textContent = '▶';
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+//  MOCK SERVER
+// ══════════════════════════════════════════════════════════
+async function loadMocks(){
+  try {
+    const res = await fetch('/api/mocks');
+    S.mocks = await res.json();
+    renderMocksView();
+  } catch(e) { console.error('loadMocks error:', e); }
+}
+
+function renderMocksView(){
+  const panel = document.getElementById('mocks-panel');
+  if(!panel) return;
+  
+  if(!S.mocks || S.mocks.length === 0){
+    panel.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--txt3)"><p style="font-size:14px;margin:0">No mock endpoints created yet</p><p style="font-size:12px;margin-top:8px">Click "+ New Mock" to create your first mock endpoint</p></div>';
+    return;
+  }
+  
+  panel.innerHTML = S.mocks.map(mock => `
+    <div class="env-card" id="mock-card-${mock.id}">
+      <div class="env-card-header" onclick="toggleMockCard(${mock.id})" style="cursor:pointer">
+        <input class="env-name-input" value="${esc(mock.path)}" id="mock-path-${mock.id}" placeholder="/path" onclick="event.stopPropagation()">
+        <select id="mock-method-${mock.id}" class="method-select" style="width:80px" onclick="event.stopPropagation()">
+          <option value="GET" ${mock.method==='GET'?'selected':''}>GET</option>
+          <option value="POST" ${mock.method==='POST'?'selected':''}>POST</option>
+          <option value="PUT" ${mock.method==='PUT'?'selected':''}>PUT</option>
+          <option value="PATCH" ${mock.method==='PATCH'?'selected':''}>PATCH</option>
+          <option value="DELETE" ${mock.method==='DELETE'?'selected':''}>DELETE</option>
+        </select>
+        <span style="font-size:10px;color:var(--txt3);margin-right:8px">${mock.enabled ? '✓' : '✗'}</span>
+        <button class="icon-btn" onclick="event.stopPropagation();toggleMock(${mock.id})" title="Toggle">${mock.enabled?'⏸':'▶'}</button>
+        <button class="icon-btn" onclick="event.stopPropagation();testMock(${mock.id})" title="Test">🧪</button>
+        <button class="icon-btn" onclick="event.stopPropagation();deleteMock(${mock.id})" style="margin-left:auto" title="Delete">🗑</button>
+        <span class="collapse-icon" id="collapse-icon-mock-${mock.id}" style="font-size:12px">▼</span>
+      </div>
+      <div class="env-card-content" id="mock-content-${mock.id}">
+      <textarea id="mock-body-${mock.id}" class="code-editor" rows="5" style="width:100%;margin-bottom:10px">${esc(mock.response_body)}</textarea>
+      <div style="display:flex;gap:12px;margin-bottom:10px">
+        <input id="mock-ctype-${mock.id}" class="kv-input" value="${esc(mock.content_type)}" placeholder="Content-Type" style="flex:1">
+        <input id="mock-status-${mock.id}" type="number" class="kv-input" value="${mock.status_code}" style="width:100px">
+        <input id="mock-delay-${mock.id}" type="number" class="kv-input" value="${mock.delay_ms}" min="0" placeholder="Delay ms" style="width:100px">
+      </div>
+      <button class="env-save-btn" onclick="saveMock(${mock.id})">Save Changes</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function createMockEndpoint(){
+  await fetch('/api/mocks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:'/mock-endpoint',method:'GET',response_body:'{}',status_code:200,delay_ms:0})});
+  await loadMocks();
+  toast('Mock endpoint created','success');
+}
+
+async function saveMock(id){
+  const path = document.getElementById(`mock-path-${id}`).value;
+  const method = document.getElementById(`mock-method-${id}`).value;
+  const response_body = document.getElementById(`mock-body-${id}`).value;
+  const content_type = document.getElementById(`mock-ctype-${id}`).value;
+  const status_code = parseInt(document.getElementById(`mock-status-${id}`).value);
+  const delay_ms = parseInt(document.getElementById(`mock-delay-${id}`).value);
+  await fetch(`/api/mocks/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,method,response_body,content_type,status_code,delay_ms})});
+  await loadMocks();
+  toast('Mock saved','success');
+}
+
+async function toggleMock(id){
+  const mock = S.mocks.find(m => m.id === id);
+  await fetch(`/api/mocks/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...mock, enabled: !mock.enabled})});
+  await loadMocks();
+}
+
+function testMock(id){
+  const mock = S.mocks.find(m => m.id === id);
+  if(mock) window.open(`/mock/${mock.path.replace(/^\//, '')}`, '_blank');
+}
+
+async function deleteMock(id){
+  if(!confirm('Delete this mock endpoint?')) return;
+  await fetch(`/api/mocks/${id}`,{method:'DELETE'});
+  await loadMocks();
+  toast('Mock deleted','info');
+}
+
+// ══════════════════════════════════════════════════════════
+//  COLLECTION RUNNER
+// ══════════════════════════════════════════════════════════
+async function loadRunnerCollections(){
+  try {
+    const res = await fetch('/api/collections');
+    const collections = await res.json();
+    const select = document.getElementById('runner-collection');
+    select.innerHTML = '<option value="">Select a collection...</option>' + collections.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  } catch(e) { console.error('loadRunnerCollections error:', e); }
+}
+
+async function runCollection(){
+  const collectionId = document.getElementById('runner-collection').value;
+  const iterations = parseInt(document.getElementById('runner-iterations').value) || 1;
+  const delay = parseInt(document.getElementById('runner-delay').value) || 0;
+  if(!collectionId){ toast('Please select a collection','error'); return; }
+  toast('Running collection...','info');
+  const resultsDiv = document.getElementById('runner-results');
+  resultsDiv.style.display = 'block';
+  resultsDiv.innerHTML = '<div style="text-align:center;padding:40px">Running...</div>';
+  try {
+    const res = await fetch('/api/runner/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({collection_id: parseInt(collectionId), iterations, delay_ms: delay})});
+    const data = await res.json();
+    renderRunnerResults(data);
+  } catch(e) { resultsDiv.innerHTML = `<div style="text-align:center;padding:40px;color:var(--red)">Error: ${e.message}</div>`; }
+}
+
+function renderRunnerResults(data){
+  const s = data.summary;
+  const html = `
+    <div style="display:flex;gap:12px;margin-bottom:20px">
+      <div style="flex:1;padding:16px;background:var(--bg2);border-radius:8px;text-align:center"><div style="font-size:24px;font-weight:700;color:var(--acc)">${s.total_requests}</div><div style="font-size:11px;color:var(--txt3)">Total</div></div>
+      <div style="flex:1;padding:16px;background:var(--bg2);border-radius:8px;text-align:center"><div style="font-size:24px;font-weight:700;color:#3dd68c">${s.total_passed}</div><div style="font-size:11px;color:var(--txt3)">Passed</div></div>
+      <div style="flex:1;padding:16px;background:var(--bg2);border-radius:8px;text-align:center"><div style="font-size:24px;font-weight:700;color:#f47067">${s.total_failed}</div><div style="font-size:11px;color:var(--txt3)">Failed</div></div>
+    </div>
+    <table class="kv-table"><thead><tr><th>#</th><th>Request</th><th>Status</th><th>Duration</th><th>Tests</th></tr></thead><tbody>
+    ${data.results.map((r, i) => {
+      const tp = (r.test_results||[]).filter(t=>t.passed).length;
+      const tf = (r.test_results||[]).filter(t=>!t.passed).length;
+      return `<tr><td>${i+1}</td><td>${esc(r.request_name)}</td><td style="color:${r.status_code<400?'#3dd68c':'#f47067'}">${r.status_code||'Err'}</td><td>${r.duration_ms?r.duration_ms+'ms':'-'}</td><td>${tp}✓ ${tf}✗</td></tr>`;
+    }).join('')}
+    </tbody></table>
+  `;
+  document.getElementById('runner-results').innerHTML = html;
+  toast('Collection run completed','success');
 }
 
 // ══════════════════════════════════════════════════════════
