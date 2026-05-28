@@ -2176,6 +2176,32 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .jt-children:hover{border-left-color:var(--acc-dim)}
 #resp-body-tree{display:none;overflow:auto;padding:12px 20px}
 /* ── Responsive Design ── */
+/* Tablet: 768px - 1024px */
+@media (max-width: 1024px) {
+  #app {
+    grid-template-columns: 200px 1fr !important;
+  }
+  
+  .logo-area {
+    width: 200px !important;
+    padding: 0 12px;
+  }
+  
+  .logo-text {
+    font-size: 13px;
+  }
+  
+  .top-tab {
+    padding: 6px 12px;
+    font-size: 11px;
+  }
+  
+  .req-name-display {
+    max-width: 120px;
+  }
+}
+
+/* Mobile Landscape: 768px */
 @media (max-width: 768px) {
   #app {
     grid-template-columns: 1fr !important;
@@ -2198,53 +2224,415 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
   
   .logo-area {
     width: auto !important;
-    padding: 0 12px;
+    padding: 0 10px;
+  }
+  
+  .logo-mark {
+    width: 22px;
+    height: 22px;
+    font-size: 11px;
+  }
+  
+  .logo-text {
+    font-size: 12px;
   }
   
   .top-nav {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
+    padding: 0 6px;
+    gap: 1px;
   }
   
   .top-tab {
     white-space: nowrap;
-    padding: 6px 10px;
+    padding: 5px 8px;
+    font-size: 10px;
+  }
+  
+  .top-right {
+    gap: 4px;
+    padding: 0 8px;
+  }
+  
+  .env-select {
+    font-size: 10px;
+    padding: 4px 6px;
+  }
+  
+  .req-name-display {
+    max-width: 100px;
+    font-size: 10px;
+    padding: 3px 8px;
+  }
+  
+  .url-bar {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 10px;
+  }
+  
+  .method-select {
+    width: 100% !important;
+    font-size: 11px;
+    padding: 6px 8px;
+  }
+  
+  .url-input-wrap {
+    width: 100%;
+    order: 3;
+  }
+  
+  .url-input {
+    font-size: 11px;
+    padding: 7px 10px;
+  }
+  
+  .btn-group {
+    width: 100%;
+    order: 4;
+    gap: 4px;
+  }
+  
+  .save-btn, .send-btn, .cancel-btn {
+    flex: 1;
+    padding: 7px 10px;
     font-size: 11px;
   }
   
-  .env-card {
-    padding: 12px;
+  .tab-bar {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 0 8px;
+  }
+  
+  .tab {
+    padding: 8px 10px;
+    font-size: 10px;
+  }
+  
+  .body-type-bar {
+    flex-wrap: wrap;
+    gap: 3px;
+  }
+  
+  .body-type-btn {
+    font-size: 9px;
+    padding: 3px 6px;
+  }
+  
+  .beautify-btn {
+    font-size: 9px;
+    padding: 2px 6px;
+  }
+  
+  .code-editor {
+    min-height: 180px;
+    font-size: 11px;
+    padding: 10px;
   }
   
   .kv-table {
     font-size: 10px;
   }
   
-  .kv-input {
-    font-size: 10px;
-    padding: 4px 6px;
-  }
-}
-
-@media (max-width: 480px) {
-  .logo-text {
-    display: none;
+  .kv-table th {
+    font-size: 8px;
+    padding: 5px 6px;
   }
   
-  .top-tab {
-    padding: 5px 8px;
+  .kv-table td {
+    padding: 2px 3px;
+  }
+  
+  .kv-input {
     font-size: 10px;
+    padding: 4px 5px;
+  }
+  
+  .add-row-btn {
+    font-size: 10px;
+    padding: 5px 10px;
+  }
+  
+  .env-card {
+    padding: 10px;
   }
   
   .env-card-header {
     flex-wrap: wrap;
     gap: 6px;
+    margin-bottom: 10px;
   }
   
-  .btn-primary {
-    padding: 6px 12px;
+  .env-name-input {
+    width: 100% !important;
+    font-size: 12px;
+  }
+  
+  .env-save-btn, .activate-btn {
+    font-size: 10px;
+    padding: 4px 10px;
+  }
+  
+  #runner-panel > div {
+    max-width: 100% !important;
+    padding: 0 4px;
+  }
+  
+  .resp-topbar {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 10px;
+  }
+  
+  .resp-label {
+    font-size: 9px;
+  }
+  
+  .status-badge {
+    font-size: 10px;
+    padding: 2px 8px;
+  }
+  
+  .resp-meta {
+    font-size: 10px;
+    gap: 8px;
+  }
+  
+  .copy-btn {
+    font-size: 10px;
+    padding: 3px 8px;
+  }
+  
+  .resp-body {
+    padding: 8px 10px;
+  }
+  
+  .resp-body pre {
     font-size: 11px;
   }
+  
+  .modal {
+    min-width: auto;
+    max-width: 95%;
+    margin: 0 10px;
+  }
+}
+
+/* Mobile Portrait: 480px */
+@media (max-width: 480px) {
+  .logo-text {
+    display: none;
+  }
+  
+  .logo-area {
+    padding: 0 6px;
+  }
+  
+  .logo-mark {
+    width: 20px;
+    height: 20px;
+    font-size: 10px;
+  }
+  
+  .top-tab {
+    padding: 4px 6px;
+    font-size: 9px;
+  }
+  
+  .env-select {
+    font-size: 9px;
+    padding: 3px 5px;
+  }
+  
+  .req-name-display {
+    max-width: 80px;
+    font-size: 9px;
+    padding: 2px 6px;
+  }
+  
+  .url-bar {
+    padding: 6px 8px;
+  }
+  
+  .method-select {
+    font-size: 10px;
+    padding: 5px 6px;
+  }
+  
+  .url-input {
+    font-size: 10px;
+    padding: 6px 8px;
+  }
+  
+  .save-btn, .send-btn, .cancel-btn {
+    padding: 6px 8px;
+    font-size: 10px;
+  }
+  
+  .tab {
+    padding: 6px 8px;
+    font-size: 9px;
+  }
+  
+  .body-type-btn {
+    padding: 2px 5px;
+    font-size: 8px;
+  }
+  
+  .code-editor {
+    min-height: 150px;
+    font-size: 10px;
+    padding: 8px;
+  }
+  
+  .kv-table {
+    font-size: 9px;
+  }
+  
+  .kv-table th {
+    font-size: 7px;
+    padding: 4px 4px;
+  }
+  
+  .kv-table td {
+    padding: 1px 2px;
+  }
+  
+  .kv-input {
+    font-size: 9px;
+    padding: 3px 4px;
+  }
+  
+  .env-card {
+    padding: 8px;
+  }
+  
+  .env-name-input {
+    font-size: 11px;
+  }
+  
+  .env-save-btn, .activate-btn, .btn-primary, .btn-secondary {
+    font-size: 9px;
+    padding: 4px 8px;
+  }
+  
+  .modal {
+    padding: 16px;
+  }
+  
+  .modal h3 {
+    font-size: 13px;
+  }
+  
+  .modal input, .modal select, .modal textarea {
+    font-size: 11px;
+    padding: 7px 10px;
+  }
+  
+  #toast-container {
+    bottom: 10px;
+    right: 10px;
+    left: 10px;
+  }
+  
+  .toast {
+    font-size: 11px;
+    padding: 8px 12px;
+    min-width: auto;
+  }
+}
+
+/* Very small screens: 360px */
+@media (max-width: 360px) {
+  .top-nav {
+    padding: 0 4px;
+  }
+  
+  .top-tab {
+    padding: 3px 5px;
+    font-size: 8px;
+  }
+  
+  .logo-area {
+    padding: 0 4px;
+  }
+  
+  .logo-mark {
+    width: 18px;
+    height: 18px;
+    font-size: 9px;
+  }
+  
+  .url-input {
+    font-size: 9px;
+    padding: 5px 6px;
+  }
+  
+  .method-select {
+    font-size: 9px;
+    padding: 4px 5px;
+  }
+  
+  .save-btn, .send-btn, .cancel-btn {
+    padding: 5px 6px;
+    font-size: 9px;
+  }
+  
+  .kv-table {
+    font-size: 8px;
+  }
+  
+  .kv-table th {
+    font-size: 6px;
+    padding: 3px 3px;
+  }
+  
+  .kv-table td {
+    padding: 1px 1px;
+  }
+  
+  .kv-input {
+    font-size: 8px;
+    padding: 2px 3px;
+  }
+  
+  .code-editor {
+    font-size: 9px;
+    padding: 6px;
+    min-height: 120px;
+  }
+  
+  .env-card {
+    padding: 6px;
+  }
+  
+  .env-name-input {
+    font-size: 10px;
+  }
+}
+
+/* ── Runner Cards Base CSS ── */
+.runner-config-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.runner-result-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  text-align: center;
+}
+
+/* ── Mock Method Select ── */
+.mock-method-select {
+  width: 80px;
 }
 .env-card-content {
   transition: max-height 0.3s ease-out;
