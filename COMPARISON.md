@@ -144,7 +144,7 @@
 | **Dependencies** | Flask + SQLite (lightweight) | Electron app (300MB+) | ❌ N/A | JavaScript bundle |
 | **Installation** | `pip install -r requirements.txt` | Download installer | ❌ N/A | CDN or npm |
 | **Learning Curve** | 🟢 Easy (familiar Postman UI) | 🟡 Moderate | 🔴 Steep (YAML syntax) | 🟢 Easy |
-| **Documentation** | ⚠️ README only | ✅ Extensive docs | ✅ Official spec | ✅ Good docs |
+| **Documentation** | ✅ Built-in help modal | ✅ Extensive docs | ✅ Official spec | ✅ Good docs |
 | **API Documentation** | ✅ Built-in generator | ✅ Auto-generated | ✅ Primary purpose | ✅ Primary purpose |
 | **Version Control** | ✅ Backup/restore JSON | ✅ Cloud versioning | ✅ Git-friendly | ✅ Git-friendly |
 | **Backup/Restore** | ✅ Full workspace export/import | ⚠️ Cloud-dependent | ✅ Git-based | ✅ File-based |
@@ -430,6 +430,12 @@
     - All data backed up in one file
     - Easy migration between instances
 
+13. **📖 Built-in Documentation**
+    - Comprehensive help modal with 14 sections
+    - Keyboard shortcuts reference
+    - Feature guides for all workflows
+    - Accessible with one click from the ? button
+
 ---
 
 ## ⚠️ 7. REQUESTLAB LIMITATIONS
@@ -456,9 +462,9 @@
    - No marketplace
    - No third-party integrations
 
-5. **❌ Documentation**
-   - README only
-   - No tutorials
+5. **⚠️ External Documentation**
+   - Built-in help modal with 14 sections (available)
+   - No external documentation site or tutorials
    - No video guides
 
 ---
@@ -479,7 +485,7 @@
 ## 🎓 9. LEARNING CURVE
 
 ### **RequestLab**
-- **Beginner**: 🟢 Easy (2 minutes to start)
+- **Beginner**: 🟢 Easy (2 minutes to start, built-in help docs)
 - **Intermediate**: 🟢 Familiar Postman-like UI
 - **Advanced**: 🟡 Python scripting requires knowledge
 
@@ -603,6 +609,7 @@ RequestLab    Swagger UI        Postman         Cloud-only
 - ✅ **CI/CD integration** with test suites and CI tokens
 - ✅ **API documentation** generator (OpenAPI, Markdown, HTML)
 - ✅ **Backup & restore** for full workspace portability
+- ✅ **Built-in help documentation** with 14 sections and keyboard shortcuts
 
 **It's NOT trying to replace Postman** for enterprise teams, but rather provides a **lean, fast, private alternative** for developers who:
 

@@ -3135,14 +3135,15 @@ body {
     </a>
     <div class="nav-links">
       <a href="#features">Features</a>
+      <a href="https://github.com/AnandShah10/RequestLab">GitHub</a>
       <a href="/app">Go to App</a>
     </div>
   </nav>
 
   <section class="hero">
-    <div class="badge"><span></span> v2.0 is live</div>
+    <div class="badge"><span></span> v3.0 is live</div>
     <h1>The API Workspace for the <span>Modern Web</span></h1>
-    <p>Ditch the bloated tools. RequestLab is a blazingly fast, multi-user, fully synced API client designed for developers who demand speed.</p>
+    <p>Ditch the bloated tools. RequestLab is a blazingly fast, self-hosted API client with team collaboration, CI/CD, monitoring, code generation, and more — all in one lightweight package.</p>
     <a href="/app" class="btn-launch">Launch Workspace</a>
   </section>
 
@@ -3167,17 +3168,62 @@ body {
     <div class="feature-card">
       <div class="fc-icon">⚡</div>
       <div class="fc-title">Lightning Fast</div>
-      <div class="fc-desc">Built with a lightweight stack to ensure zero lag, instant switching, and a buttery smooth developer experience.</div>
+      <div class="fc-desc">2-second startup, &lt;100MB RAM. Built with a lightweight Python + Flask stack — no Electron, no heavy frameworks, zero lag.</div>
     </div>
     <div class="feature-card">
       <div class="fc-icon">🔒</div>
-      <div class="fc-title">Multi-User Sync</div>
-      <div class="fc-desc">Securely login to sync your collections, environments, and history across all your devices instantly.</div>
+      <div class="fc-title">100% Private & Self-Hosted</div>
+      <div class="fc-desc">Complete data ownership with local SQLite storage. No cloud dependency, no telemetry, no data leaving your machine.</div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon">👥</div>
+      <div class="fc-title">Team Collaboration</div>
+      <div class="fc-desc">Create teams, invite members with role-based access (Admin/Editor/Viewer), and share collections for collaborative API testing.</div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon">🐍</div>
+      <div class="fc-title">Python Scripting</div>
+      <div class="fc-desc">Write pre-request and test scripts in Python with a Postman-compatible <code>pm.*</code> API. Pre-processors and post-processors on every request.</div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon">🔄</div>
+      <div class="fc-title">CI/CD & Test Suites</div>
+      <div class="fc-desc">Group collections into test suites, generate CI tokens, and integrate with Jenkins, GitHub Actions, and GitLab CI pipelines.</div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon">📡</div>
+      <div class="fc-title">API Monitor</div>
+      <div class="fc-desc">Track uptime with configurable health checks, interval scheduling, failure tracking, and detailed check history logs.</div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon">💻</div>
+      <div class="fc-title">Code Generation</div>
+      <div class="fc-desc">Generate ready-to-use code in 10+ languages — cURL, Python, JavaScript, Go, Java, C#, PHP, Ruby, Rust, and Node.js.</div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon">📝</div>
+      <div class="fc-title">API Documentation</div>
+      <div class="fc-desc">Auto-generate professional docs from saved requests. Export as OpenAPI 3.0, Markdown, or standalone HTML.</div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon">📱</div>
+      <div class="fc-title">Fully Responsive</div>
+      <div class="fc-desc">Works on desktop, tablet, and mobile with 4 adaptive breakpoints. The only API client with full mobile support.</div>
     </div>
     <div class="feature-card">
       <div class="fc-icon">🎯</div>
       <div class="fc-title">Smart Variables</div>
-      <div class="fc-desc">Powerful environment variables with native tooltip previews and seamless collection management.</div>
+      <div class="fc-desc">Environment and global variables with <code>{{variable}}</code> substitution, color-coded highlighting, and autocomplete.</div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon">🎭</div>
+      <div class="fc-title">Mock Server</div>
+      <div class="fc-desc">Create mock API endpoints with custom responses, status codes, and delays — test without a backend.</div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon">💾</div>
+      <div class="fc-title">Backup & Restore</div>
+      <div class="fc-desc">Export your entire workspace as JSON — collections, requests, environments, monitors, teams, and more. Restore with one click.</div>
     </div>
   </section>
 </body>
@@ -3253,6 +3299,16 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .script-editor{width:100%;min-height:280px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;font-size:12.5px;line-height:1.6;color:var(--txt);font-family:var(--mono);resize:vertical;outline:none;tab-size:4;transition:border-color .15s}
 .script-editor:focus{border-color:var(--acc)}
 .script-editor::placeholder{color:var(--txt3);font-style:italic}
+#help-content h1{margin:0 0 14px;font-size:22px;font-weight:700;color:var(--txt)}
+#help-content h2{margin:0 0 14px;font-size:18px;font-weight:700;color:var(--txt)}
+#help-content h3{margin:18px 0 8px;font-size:14px;font-weight:600;color:var(--txt)}
+#help-content p{margin:0 0 10px}
+#help-content ul,#help-content ol{margin:0 0 12px;padding-left:22px}
+#help-content ul,#help-content ol{margin:0 0 12px;padding-left:22px}
+#help-content li{margin-bottom:4px}
+#help-content code{background:var(--bg1);padding:1px 5px;border-radius:3px;font-size:12px;color:var(--acc)}
+#help-content pre{margin:0 0 12px}
+.help-nav-item:hover{background:var(--bg2) !important}
 .icon-btn{background:none;border:1px solid var(--border);color:var(--txt3);cursor:pointer;padding:5px 8px;border-radius:var(--radius);display:flex;align-items:center;font-size:12px;transition:all .15s;font-family:var(--mono)}
 .icon-btn:hover{color:var(--txt);background:var(--bg3);border-color:var(--border2)}
 .icon-btn.accent{border-color:var(--acc-dim);color:var(--acc)}
@@ -4144,6 +4200,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
       <button class="top-tab" onclick="switchView('settings')">Settings</button>
     </div>
     <div class="top-right">
+      <button class="icon-btn" onclick="openHelpModal()" title="Documentation & Shortcuts" style="border:none;font-size:15px;font-weight:700;color:var(--acc)">?</button>
       <button class="icon-btn" onclick="toggleTheme()" title="Toggle Theme" id="theme-btn" style="border:none;font-size:16px;">☀️</button>
       <select id="env-selector" class="env-select" onchange="selectEnv(this.value)">
         <option value="">No Environment</option>
@@ -4833,6 +4890,17 @@ pm.test('Status is 200', lambda: pm.response.get('status_code') == 200)" spellch
   <div class="modal" style="width:600px">
     <div class="modal-header"><h3 id="monitor-logs-title">Monitor Logs</h3><button class="modal-close" onclick="closeModal('monitor-logs-modal')">&times;</button></div>
     <div style="padding:16px;max-height:400px;overflow-y:auto" id="monitor-logs-content"></div>
+  </div>
+</div>
+
+<!-- ══ Help / Documentation Modal ══ -->
+<div class="modal-overlay" id="help-modal">
+  <div class="modal" style="width:780px;max-height:85vh;display:flex;flex-direction:column">
+    <div class="modal-header"><h3>RequestLab Documentation</h3><button class="modal-close" onclick="closeModal('help-modal')">&times;</button></div>
+    <div style="display:flex;flex:1;overflow:hidden">
+      <div id="help-nav" style="width:180px;min-width:180px;border-right:1px solid var(--border);overflow-y:auto;padding:8px 0;background:var(--bg1)"></div>
+      <div id="help-content" style="flex:1;overflow-y:auto;padding:20px 24px;font-size:13px;line-height:1.7;color:var(--txt2)"></div>
+    </div>
   </div>
 </div>
 
@@ -6646,6 +6714,437 @@ async function performSave(name,collId,folderId){
 
 function openModal(id){ document.getElementById(id).classList.add('open'); }
 function closeModal(id){ document.getElementById(id).classList.remove('open'); }
+
+// ══════════════════════════════════════════════════════════
+//  HELP / DOCUMENTATION MODAL
+// ══════════════════════════════════════════════════════════
+const HELP_SECTIONS = {
+  'getting-started': {title:'Getting Started', content:`
+<h2>Getting Started</h2>
+<p><b>RequestLab</b> is a lightweight, self-hosted API testing client built with Python + Flask. No heavy frameworks, complete privacy, and powerful features.</p>
+<h3>Quick Start</h3>
+<ol>
+<li>Run <code>pip install -r requirements.txt</code></li>
+<li>Run <code>python postman.py</code></li>
+<li>Open <code>http://localhost:5000</code> in your browser</li>
+<li>Register an account and start testing APIs</li>
+</ol>
+<h3>Navigation</h3>
+<p>The top navigation bar gives you access to all major views:</p>
+<ul>
+<li><b>Builder</b> — The main request builder (default view)</li>
+<li><b>Envs</b> — Environment variable management</li>
+<li><b>Mocks</b> — Mock server configuration</li>
+<li><b>Runner</b> — Collection runner for automated testing</li>
+<li><b>Test Suites</b> — CI/CD test suite management</li>
+<li><b>Docs</b> — API documentation generator</li>
+<li><b>Monitor</b> — API uptime monitoring</li>
+<li><b>Settings</b> — Backup/restore, CI tokens, and preferences</li>
+</ul>
+<p>The <b>sidebar</b> has three tabs: <b>Collections</b>, <b>History</b>, and <b>Teams</b>.</p>
+`},
+  'shortcuts': {title:'Keyboard Shortcuts', content:`
+<h2>Keyboard Shortcuts</h2>
+<table style="width:100%;border-collapse:collapse;font-size:12.5px">
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 0"><b>Ctrl + Enter</b></td><td>Send request (from URL bar)</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 0"><b>Enter</b></td><td>Send request (from URL bar)</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 0"><b>Ctrl + /</b></td><td>Toggle comment in body editor</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 0"><b>Ctrl + B</b></td><td>Beautify/format JSON body</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 0"><b>Ctrl + S</b></td><td>Save current request</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 0"><b>Tab</b></td><td>Indent in body/script editor</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 0"><b>Escape</b></td><td>Close active modal</td></tr>
+<tr><td style="padding:6px 0"><b>Ctrl + K</b></td><td>Focus URL bar</td></tr>
+</table>
+`},
+  'request-builder': {title:'Request Builder', content:`
+<h2>Request Builder</h2>
+<p>The request builder is the core of RequestLab. It lets you construct and send HTTP requests.</p>
+<h3>URL Bar</h3>
+<ul>
+<li>Enter any URL with optional <code>{{variable}}</code> placeholders for substitution</li>
+<li>Select HTTP method: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS</li>
+<li>Choose protocol: HTTP or HTTPS</li>
+<li>Press <b>Enter</b> or click <b>Send</b> to execute</li>
+</ul>
+<h3>Params Tab</h3>
+<p>Add query parameters as key-value pairs. Toggle enable/disable per row. Badges show active count.</p>
+<h3>Headers Tab</h3>
+<p>Set custom HTTP headers. Common headers like Content-Type are auto-set based on body type.</p>
+<h3>Cookies Tab</h3>
+<p>Add per-request cookies as key-value pairs. These are sent with the request automatically.</p>
+<h3>Body Tab</h3>
+<p>Supported body types:</p>
+<ul>
+<li><b>None</b> — No body (GET, HEAD)</li>
+<li><b>JSON</b> — JSON editor with syntax highlighting and comment stripping</li>
+<li><b>GraphQL</b> — Separate query and variables editors</li>
+<li><b>Raw</b> — Plain text body</li>
+<li><b>Form Data</b> — Multipart with file upload support</li>
+<li><b>x-www-form-urlencoded</b> — URL-encoded key-value pairs</li>
+<li><b>SOAP</b> — XML envelope editor</li>
+<li><b>XML</b> — Raw XML body</li>
+</ul>
+<h3>Auth Tab</h3>
+<p>Authentication types:</p>
+<ul>
+<li><b>No Auth</b> — No authentication</li>
+<li><b>Basic Auth</b> — Username and password</li>
+<li><b>Bearer Token</b> — JWT or API token</li>
+<li><b>OAuth 2.0</b> — Token with optional prefix</li>
+<li><b>API Key</b> — Key-value in header or query</li>
+<li><b>AWS Signature v4</b> — Access key, secret, region, service</li>
+</ul>
+<h3>Pre-Processor Tab</h3>
+<p>Python script that runs <b>before</b> the request. Modify headers, params, or set environment variables.</p>
+<pre style="background:var(--bg1);padding:10px;border-radius:6px;font-size:12px;overflow-x:auto">pm.environment.set('timestamp', str(int(__import__('time').time())))</pre>
+<h3>Post-Processor Tab</h3>
+<p>Python script that runs <b>after</b> the response. Validate, transform, or extract data.</p>
+<pre style="background:var(--bg1);padding:10px;border-radius:6px;font-size:12px;overflow-x:auto">pm.test('Status is 200', lambda: pm.response.get('status_code') == 200)</pre>
+`},
+  'response': {title:'Response Viewer', content:`
+<h2>Response Viewer</h2>
+<p>After sending a request, the response panel shows:</p>
+<ul>
+<li><b>Status Badge</b> — Color-coded: green (2xx), yellow (3xx), orange (4xx), red (5xx)</li>
+<li><b>Stats</b> — Response time (ms), body size, redirect count</li>
+</ul>
+<h3>View Modes</h3>
+<ul>
+<li><b>Pretty</b> — Syntax-highlighted, formatted JSON/XML</li>
+<li><b>Tree</b> — Collapsible JSON tree structure</li>
+<li><b>Raw</b> — Unformatted response body</li>
+<li><b>Preview</b> — HTML rendering for web responses</li>
+</ul>
+<h3>Response Tabs</h3>
+<ul>
+<li><b>Body</b> — Response content in selected view mode</li>
+<li><b>Headers</b> — Complete response header table</li>
+<li><b>Tests</b> — Assertion results from pre/post processors and test scripts</li>
+</ul>
+`},
+  'environments': {title:'Environments', content:`
+<h2>Environments & Variables</h2>
+<p>Manage environment-specific variables with real-time substitution.</p>
+<h3>Variable Syntax</h3>
+<p>Use double curly braces: <code>{{variable_name}}</code></p>
+<p>Variables are substituted in: URL, params, headers, body, and auth fields.</p>
+<h3>Variable Highlighting</h3>
+<ul>
+<li><span style="color:#3dd68c">Green badge</span> — Variable resolved successfully</li>
+<li><span style="color:#f47067">Red badge</span> — Unresolved variable (not found in environment)</li>
+<li><span style="color:#f0883e">Orange badge</span> — Variable with a value</li>
+</ul>
+<h3>Managing Environments</h3>
+<ol>
+<li>Click <b>Envs</b> in the top nav</li>
+<li>Click <b>+ New Environment</b></li>
+<li>Add key-value pairs</li>
+<li>Set as <b>Active</b> to use it</li>
+<li>Use the environment selector dropdown in the top-right</li>
+</ol>
+<h3>Global Variables</h3>
+<p>Global variables are always active across all environments. Set them via scripts:</p>
+<pre style="background:var(--bg1);padding:10px;border-radius:6px;font-size:12px;overflow-x:auto">pm.globals.set('api_key', 'my-secret-key')</pre>
+`},
+  'collections': {title:'Collections', content:`
+<h2>Collections & Organization</h2>
+<h3>Creating Collections</h3>
+<ol>
+<li>Click <b>+</b> in the sidebar toolbar</li>
+<li>Enter a collection name</li>
+<li>Use the context menu to add folders or requests</li>
+</ol>
+<h3>Folders</h3>
+<p>Create nested folders to organize requests hierarchically. Drag and drop requests to reorder or move between folders.</p>
+<h3>Saving Requests</h3>
+<ol>
+<li>Build your request in the builder</li>
+<li>Click <b>Save</b> or press <b>Ctrl+S</b></li>
+<li>Select a collection and optional folder</li>
+<li>Click <b>Save</b></li>
+</ol>
+<h3>Importing</h3>
+<p>Supported formats:</p>
+<ul>
+<li><b>Postman Collections</b> (v2.1)</li>
+<li><b>OpenAPI 3.0</b> specifications</li>
+<li><b>Swagger 2.0</b> specifications</li>
+<li><b>RequestLab Backup</b> (JSON)</li>
+</ul>
+<p>Click the <b>⬆</b> button in the sidebar to import.</p>
+<h3>Multi-Tab Interface</h3>
+<p>Open multiple requests in tabs. Each tab maintains its own state including params, headers, body, and response. Tabs persist across page reloads via localStorage.</p>
+`},
+  'scripting': {title:'Scripting', content:`
+<h2>Scripting Engine</h2>
+<p>Write pre-request and test scripts in <b>Python</b> or <b>JavaScript</b>.</p>
+<h3>Postman-Compatible API</h3>
+<table style="width:100%;border-collapse:collapse;font-size:12.5px">
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 0"><code>pm.environment.get(key)</code></td><td>Get environment variable</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 0"><code>pm.environment.set(key, val)</code></td><td>Set environment variable</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 0"><code>pm.globals.get(key)</code></td><td>Get global variable</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 0"><code>pm.globals.set(key, val)</code></td><td>Set global variable</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 0"><code>pm.request</code></td><td>Current request object</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 0"><code>pm.response</code></td><td>Response object (post-request only)</td></tr>
+<tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 0"><code>pm.test(name, fn)</code></td><td>Define a test assertion</td></tr>
+<tr><td style="padding:5px 0"><code>pm.expect(name, val)</code></td><td>Assertion builder</td></tr>
+</table>
+<h3>Assertion Methods</h3>
+<ul>
+<li><code>.to_equal(expected)</code> — Equality check</li>
+<li><code>.to_be_truthy()</code> — Truthiness check</li>
+<li><code>.to_contain(value)</code> — Contains check</li>
+</ul>
+<h3>Python Example</h3>
+<pre style="background:var(--bg1);padding:10px;border-radius:6px;font-size:12px;overflow-x:auto"># Pre-request: set dynamic values
+pm.environment.set('timestamp', str(int(__import__('time').time())))
+
+# Test: validate response
+status = pm.response.get('status_code')
+pm.test('Status is 200', lambda: pm.expect('Status', status == 200))
+pm.test('Has users', lambda: pm.expect('Users', 'users' in pm.response.get('body')))</pre>
+<h3>JavaScript Example</h3>
+<pre style="background:var(--bg1);padding:10px;border-radius:6px;font-size:12px;overflow-x:auto">pm.test("Status is 200", function() {
+    pm.expect(pm.response.status).to.equal(200);
+});
+pm.test("Has data", function() {
+    const body = pm.response.json();
+    pm.expect(body).to.have.property('data');
+});</pre>
+`},
+  'teams': {title:'Team Collaboration', content:`
+<h2>Team Collaboration</h2>
+<h3>Creating Teams</h3>
+<ol>
+<li>Click the <b>Teams</b> tab in the sidebar</li>
+<li>Click <b>+ New Team</b></li>
+<li>Enter a team name</li>
+</ol>
+<h3>Inviting Members</h3>
+<ol>
+<li>Open team details by clicking on a team</li>
+<li>Enter the member's email address</li>
+<li>Select a role: <b>Viewer</b>, <b>Editor</b>, or <b>Admin</b></li>
+<li>Click <b>Invite</b></li>
+</ol>
+<h3>Roles</h3>
+<ul>
+<li><b>Viewer</b> — Read-only access to shared collections</li>
+<li><b>Editor</b> — Can modify requests and collections</li>
+<li><b>Admin</b> — Full control including member management</li>
+</ul>
+<h3>Sharing Collections</h3>
+<ol>
+<li>Open team details</li>
+<li>Select a collection from the dropdown</li>
+<li>Click <b>Share</b></li>
+</ol>
+<p>Shared collections are accessible to all team members based on their role.</p>
+`},
+  'cicd': {title:'CI/CD & Test Suites', content:`
+<h2>CI/CD Integration & Test Suites</h2>
+<h3>Test Suites</h3>
+<p>Group collections into test suites for organized, repeatable testing.</p>
+<ol>
+<li>Navigate to <b>Test Suites</b> in the top nav</li>
+<li>Click <b>New Test Suite</b></li>
+<li>Name the suite and select collections to include</li>
+<li>Click <b>Create</b></li>
+</ol>
+<h3>Running Test Suites</h3>
+<p>Click <b>Run</b> on any test suite to execute all requests in the included collections. Results show pass/fail status with assertion details.</p>
+<h3>CI Tokens</h3>
+<p>Generate API tokens for automated CI/CD pipelines:</p>
+<ol>
+<li>Go to <b>Settings</b></li>
+<li>Navigate to <b>CI Tokens</b> section</li>
+<li>Click <b>Generate Token</b></li>
+<li>Use the token in your CI/CD pipeline to trigger test runs</li>
+</ol>
+<h3>CI/CD Integration</h3>
+<pre style="background:var(--bg1);padding:10px;border-radius:6px;font-size:12px;overflow-x:auto"># Example: Run test suite via API
+curl -X POST http://localhost:5000/api/ci/run-suite \\
+  -H "Authorization: Bearer YOUR_CI_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"suite_id": 1}'</pre>
+`},
+  'api-docs': {title:'API Documentation', content:`
+<h2>API Documentation Generator</h2>
+<p>Generate professional documentation from your saved requests.</p>
+<h3>Creating Documentation</h3>
+<ol>
+<li>Navigate to <b>Docs</b> in the top nav</li>
+<li>Click <b>New Documentation</b></li>
+<li>Select a collection to document</li>
+<li>Add custom descriptions and details</li>
+<li>Click <b>Generate</b></li>
+</ol>
+<h3>Export Formats</h3>
+<ul>
+<li><b>OpenAPI 3.0</b> — Standard YAML specification file</li>
+<li><b>Markdown</b> — README-style documentation</li>
+<li><b>HTML</b> — Standalone styled HTML page</li>
+</ul>
+<h3>Sharing</h3>
+<p>Generated documentation can be shared via link or downloaded for external hosting.</p>
+`},
+  'code-gen': {title:'Code Generation', content:`
+<h2>Code Generation</h2>
+<p>Generate ready-to-use code snippets for any request.</p>
+<h3>How to Use</h3>
+<ol>
+<li>Build your request in the builder</li>
+<li>Click the <b>Code</b> button (or right-click)</li>
+<li>Select a target language</li>
+<li>Copy the generated code</li>
+</ol>
+<h3>Supported Languages</h3>
+<ul>
+<li><b>cURL</b> — Command-line HTTP</li>
+<li><b>Python</b> — requests library</li>
+<li><b>JavaScript</b> — fetch API</li>
+<li><b>Node.js</b> — axios</li>
+<li><b>Go</b> — net/http</li>
+<li><b>Java</b> — HttpClient</li>
+<li><b>C#</b> — HttpClient</li>
+<li><b>PHP</b> — cURL</li>
+<li><b>Ruby</b> — net/http</li>
+<li><b>Rust</b> — reqwest</li>
+</ul>
+`},
+  'monitor': {title:'API Monitor', content:`
+<h2>API Monitor</h2>
+<p>Track API uptime, performance, and reliability.</p>
+<h3>Creating a Monitor</h3>
+<ol>
+<li>Navigate to <b>Monitor</b> in the top nav</li>
+<li>Click <b>New Monitor</b></li>
+<li>Configure: name, URL, HTTP method, expected status</li>
+<li>Set check interval (in seconds)</li>
+<li>Optionally specify expected body content</li>
+<li>Click <b>Save Monitor</b></li>
+</ol>
+<h3>Monitor Dashboard</h3>
+<p>Each monitor displays:</p>
+<ul>
+<li><b>Status</b> — Last check result (up/down)</li>
+<li><b>Uptime %</b> — Percentage of successful checks</li>
+<li><b>Last Check</b> — When the monitor last ran</li>
+<li><b>Duration</b> — Response time of last check</li>
+<li><b>Total Checks / Failures</b> — Lifetime statistics</li>
+</ul>
+<h3>Running Checks</h3>
+<p>Click <b>Run Now</b> to manually trigger a check. View detailed logs by clicking <b>Logs</b>.</p>
+<h3>Check Logs</h3>
+<p>Each log entry includes: status, status code, duration, response body snippet, and any errors.</p>
+`},
+  'mock-server': {title:'Mock Server', content:`
+<h2>Mock Server</h2>
+<p>Create mock API endpoints for testing without a backend.</p>
+<h3>Creating Mocks</h3>
+<ol>
+<li>Click <b>Mocks</b> in the top nav</li>
+<li>Click <b>+ New Mock</b></li>
+<li>Configure: path, method, status code, response body</li>
+<li>Optionally add response delay</li>
+<li>Save and enable the mock</li>
+</ol>
+<h3>Testing Mocks</h3>
+<p>Base URL: <code>http://localhost:5000/mock/</code></p>
+<p>Use the 🧪 button on any mock card to instantly test it.</p>
+<h3>Features</h3>
+<ul>
+<li>Static JSON/text responses</li>
+<li>Configurable HTTP methods</li>
+<li>Custom status codes</li>
+<li>Response delay simulation</li>
+<li>Enable/disable toggles</li>
+</ul>
+`},
+  'runner': {title:'Collection Runner', content:`
+<h2>Collection Runner</h2>
+<p>Automate API testing by running entire collections sequentially.</p>
+<h3>Running Collections</h3>
+<ol>
+<li>Click <b>Runner</b> in the top nav</li>
+<li>Select a collection from the dropdown</li>
+<li>Configure iterations (number of times to run)</li>
+<li>Set delay between requests (ms)</li>
+<li>Click <b>Run Collection</b></li>
+</ol>
+<h3>Results</h3>
+<p>View detailed results including:</p>
+<ul>
+<li>Pass/fail status per request</li>
+<li>Assertion results</li>
+<li>Execution time per request</li>
+<li>Total run statistics</li>
+</ul>
+`},
+  'backup': {title:'Backup & Restore', content:`
+<h2>Backup & Restore</h2>
+<p>Protect your data with full workspace backup and restore.</p>
+<h3>Exporting Backup</h3>
+<ol>
+<li>Go to <b>Settings</b></li>
+<li>Click <b>Export Backup</b></li>
+<li>A JSON file will download containing all your data</li>
+</ol>
+<p>Backup includes: users, collections, folders, requests, environments, mocks, history, teams, monitors, test suites, API docs, and CI tokens.</p>
+<h3>Restoring from Backup</h3>
+<ol>
+<li>Go to <b>Settings</b></li>
+<li>Click <b>Import Backup</b> and select your JSON backup file</li>
+<li>Data will be restored from the backup</li>
+</ol>
+<p><b>Note:</b> Importing a backup will merge/overwrite existing data. Use with caution.</p>
+`},
+  'misc': {title:'Tips & Troubleshooting', content:`
+<h2>Tips & Troubleshooting</h2>
+<h3>Tips</h3>
+<ul>
+<li>Use <code>{{variable}}</code> syntax anywhere for dynamic values</li>
+<li>Right-click on requests in the sidebar for context menu options</li>
+<li>Drag requests to reorder or move between folders</li>
+<li>Use the workspace state persistence — your tabs survive page reloads</li>
+<li>Toggle dark/light theme with the ☀️/🌙 button</li>
+<li>Use Pre-Processor scripts to add dynamic headers or timestamps</li>
+<li>Use Post-Processor scripts to validate responses and set variables for the next request</li>
+</ul>
+<h3>Themes</h3>
+<p>Toggle between dark and light mode with the theme button in the top-right. Your preference is saved automatically.</p>
+<h3>Responsive Design</h3>
+<ul>
+<li><b>Desktop (1024px+)</b> — Full sidebar, multi-column layout</li>
+<li><b>Tablet (768–1024px)</b> — Compact sidebar, optimized spacing</li>
+<li><b>Mobile Landscape (480–768px)</b> — Hidden sidebar, wrapped URL bar</li>
+<li><b>Mobile Portrait (&lt;480px)</b> — Ultra-compact, touch-friendly</li>
+</ul>
+<h3>Data Storage</h3>
+<p>All data is stored in <code>RequestLab.db</code> (SQLite) in the project root. To migrate, simply copy this file or use the backup/restore feature.</p>
+`}
+};
+
+function openHelpModal(){
+  const nav=document.getElementById('help-nav');
+  const content=document.getElementById('help-content');
+  const keys=Object.keys(HELP_SECTIONS);
+  nav.innerHTML=keys.map(k=>`<div class="help-nav-item" data-key="${k}" onclick="showHelpSection('${k}')" style="padding:8px 14px;cursor:pointer;font-size:12px;color:var(--txt2);border-left:3px solid transparent;transition:all .15s">${HELP_SECTIONS[k].title}</div>`).join('');
+  showHelpSection(keys[0]);
+  openModal('help-modal');
+}
+
+function showHelpSection(key){
+  const content=document.getElementById('help-content');
+  content.innerHTML=HELP_SECTIONS[key].content;
+  document.querySelectorAll('.help-nav-item').forEach(el=>{
+    const active=el.dataset.key===key;
+    el.style.borderLeftColor=active?'var(--acc)':'transparent';
+    el.style.color=active?'var(--acc)':'var(--txt2)';
+    el.style.background=active?'var(--bg2)':'transparent';
+    el.style.fontWeight=active?'600':'400';
+  });
+}
 
 // ══════════════════════════════════════════════════════════
 //  HISTORY

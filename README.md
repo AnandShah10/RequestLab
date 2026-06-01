@@ -290,10 +290,19 @@ Works perfectly on all devices:
 - ✅ State persistence during session
 
 #### Keyboard Shortcuts
+- `Ctrl + Enter` / `Enter` - Send request
 - `Ctrl + /` - Toggle comment in body editor
 - `Ctrl + B` - Beautify JSON body
-- `Tab` - Indent in body editor
-- `Enter` - Send request from URL bar
+- `Ctrl + S` - Save current request
+- `Ctrl + K` - Focus URL bar
+- `Tab` - Indent in body/script editor
+- `Escape` - Close active modal
+
+#### Built-in Help Documentation
+- ✅ Click the **?** button in the top-right to open the comprehensive documentation modal
+- ✅ 14 sections covering all features, shortcuts, and workflows
+- ✅ Sidebar navigation with syntax-highlighted code examples
+- ✅ Covers: Request Builder, Scripting, Teams, CI/CD, Monitor, Code Generation, and more
 
 ---
 
@@ -487,7 +496,7 @@ We welcome contributions! Here's how you can help:
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/requestlab.git
+git clone https://github.com/AnandShah10/RequestLab.git
 cd requestlab
 
 # Create virtual environment
@@ -520,9 +529,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/requestlab/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/requestlab/discussions)
-- **Email**: your-email@example.com
+- **Issues**: [GitHub Issues](https://github.com/AnandShah10/RequestLab/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/AnandShah10/RequestLab/discussions)
+- **Email**: shahanand1072004@gmail.com
 
 ---
 
@@ -551,6 +560,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [x] API monitor with uptime tracking
 - [x] Request-level cookies
 - [x] Pre-processor and post-processor scripting tabs
+- [x] Built-in help documentation with 14 sections and keyboard shortcuts reference
 
 ### 🚧 In Progress
 - [ ] gRPC support
