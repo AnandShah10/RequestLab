@@ -71,6 +71,9 @@
 | **Search** | ✅ Sidebar search | ✅ Global search | ❌ N/A | ⚠️ Browser search |
 | **Import/Export** | Postman, OpenAPI, Swagger | Multiple formats | YAML/JSON | ❌ N/A |
 | **Workspace State** | ✅ localStorage persistence | ✅ Cloud sync | ❌ N/A | ❌ No |
+| **Team Collaboration** | ✅ Teams + roles + shared | ✅ Real-time sync | ❌ N/A | ❌ No |
+| **Cookies** | ✅ Per-request cookie table | ✅ Cookie manager | ❌ N/A | ❌ No |
+| **Pre/Post Processors** | ✅ Python pre & post scripts | ✅ JS pre-request & tests | ❌ N/A | ❌ No |
 
 ---
 
@@ -99,8 +102,9 @@
 | **Collection Runner** | ✅ Sequential execution | ✅ Collection runner | ❌ N/A | ❌ No |
 | **Iterations** | ✅ Configurable | ✅ Data-driven | ❌ N/A | ❌ No |
 | **Test Results** | ✅ Pass/fail with assertions | ✅ Detailed reports | ❌ N/A | ❌ No |
-| **Automated Testing** | ⚠️ Basic runner | ✅ Monitors + CI/CD | ❌ N/A | ❌ No |
-| **Code Generation** | ❌ Not yet | ✅ 10+ languages | ✅ Via codegen tools | ❌ No |
+| **Automated Testing** | ✅ Test suites + CI tokens | ✅ Monitors + CI/CD | ❌ N/A | ❌ No |
+| **Code Generation** | ✅ 10+ languages | ✅ 10+ languages | ✅ Via codegen tools | ❌ No |
+| **API Monitoring** | ✅ Built-in uptime monitor | ✅ Cloud monitors | ❌ N/A | ❌ No |
 
 ---
 
@@ -114,7 +118,7 @@
 | **Data Storage** | ✅ Local SQLite | ⚠️ Cloud (optional) | ✅ Your infrastructure | ✅ Your server |
 | **Data Privacy** | ✅ 100% self-hosted | ⚠️ Cloud by default | ✅ You control | ✅ You control |
 | **Offline Mode** | ✅ Full offline support | ⚠️ Limited | ✅ Always offline | ✅ Always offline |
-| **Team Sharing** | ❌ Not yet | ✅ Real-time sync | ✅ Via Git/repos | ✅ Via hosting |
+| **Team Sharing** | ✅ Teams + shared collections | ✅ Real-time sync | ✅ Via Git/repos | ✅ Via hosting |
 
 ---
 
@@ -141,8 +145,9 @@
 | **Installation** | `pip install -r requirements.txt` | Download installer | ❌ N/A | CDN or npm |
 | **Learning Curve** | 🟢 Easy (familiar Postman UI) | 🟡 Moderate | 🔴 Steep (YAML syntax) | 🟢 Easy |
 | **Documentation** | ⚠️ README only | ✅ Extensive docs | ✅ Official spec | ✅ Good docs |
-| **API Documentation** | ❌ Not yet | ✅ Auto-generated | ✅ Primary purpose | ✅ Primary purpose |
-| **Version Control** | ⚠️ Manual DB backup | ✅ Cloud versioning | ✅ Git-friendly | ✅ Git-friendly |
+| **API Documentation** | ✅ Built-in generator | ✅ Auto-generated | ✅ Primary purpose | ✅ Primary purpose |
+| **Version Control** | ✅ Backup/restore JSON | ✅ Cloud versioning | ✅ Git-friendly | ✅ Git-friendly |
+| **Backup/Restore** | ✅ Full workspace export/import | ⚠️ Cloud-dependent | ✅ Git-based | ✅ File-based |
 
 ---
 
@@ -169,7 +174,8 @@
 │  RequestLab.db (single file)            │
 │  - Users, Collections, Requests         │
 │  - Environments, History, Mocks         │
-│  - Collection Runs                      │
+│  - Teams, Monitors, Test Suites         │
+│  - API Docs, CI Tokens, Backups        │
 └─────────────────────────────────────────┘
 ```
 
@@ -181,7 +187,7 @@
 - ✅ Easy to modify and extend
 
 **Limitations:**
-- ❌ No real-time collaboration
+- ❌ No real-time collaboration (async only)
 - ❌ No cloud sync
 - ❌ Single-server architecture
 - ❌ Limited scalability
@@ -322,16 +328,19 @@
 ✅ You're an individual developer or small team  
 ✅ You want zero dependencies and fast startup  
 ✅ You need scripting in Python (not just JavaScript)  
+✅ You need team collaboration without per-seat costs  
+✅ You want built-in API monitoring and uptime tracking  
+✅ You need CI/CD integration with test suites  
+✅ You want code generation for multiple languages  
+✅ You need API documentation generation  
 
 ### **Choose Postman when:**
-✅ You need team collaboration and real-time sync  
+✅ You need real-time team sync and simultaneous editing  
 ✅ You want enterprise features (SSO, audit logs)  
-✅ You need API monitoring and automated testing  
-✅ You want cloud-based mock servers  
-✅ You need extensive code generation  
-✅ You're a large team or enterprise  
+✅ You need cloud-based mock servers  
+✅ You're a large team or enterprise with budget  
 ✅ You want a mature, feature-complete platform  
-✅ Budget is not a constraint  
+✅ You need hosted API documentation with analytics  
 
 ### **Choose OpenAPI when:**
 ✅ You follow API design-first methodology  
@@ -401,48 +410,53 @@
    - Easy to modify and extend
    - Simple CSS customization
 
+9. **👥 Team Collaboration**
+   - Built-in teams with role-based access (Admin/Editor/Viewer)
+   - Shared collections for collaborative testing
+   - No extra cost per team member
+
+10. **📡 API Monitoring**
+    - Built-in uptime monitors
+    - Configurable check intervals
+    - Failure tracking and uptime percentages
+    - Detailed check history logs
+
+11. **💻 Code Generation**
+    - Generate code in 10+ languages (cURL, Python, JS, Go, Java, C#, PHP, Ruby, Rust)
+    - One-click code generation from any request
+
+12. **💾 Backup & Restore**
+    - Full workspace JSON export/import
+    - All data backed up in one file
+    - Easy migration between instances
+
 ---
 
 ## ⚠️ 7. REQUESTLAB LIMITATIONS
 
 ### **What RequestLab Lacks:**
 
-1. **❌ Team Collaboration**
-   - No real-time sync
-   - No shared workspaces
-   - No team features yet
+1. **⚠️ Real-Time Collaboration**
+   - Team collaboration via shared collections (available)
+   - No real-time WebSocket sync between users
+   - No simultaneous editing
 
 2. **❌ Cloud Features**
-   - No cloud backup
+   - No cloud backup (local backup/restore available)
    - No multi-device sync
    - No SaaS option
 
-3. **❌ Advanced Testing**
-   - No API monitoring
-   - No CI/CD integration
-   - No scheduled tests
-
-4. **❌ Code Generation**
-   - No client SDK generation
-   - No server stub generation
-   - No language-specific exports
-
-5. **❌ API Documentation**
-   - No auto-generated docs
-   - No public sharing
-   - No documentation hosting
-
-6. **❌ Enterprise Features**
+3. **❌ Enterprise Features**
    - No SSO/SAML
    - No audit logs
-   - No role-based access control
+   - No granular role-based access control beyond team roles
 
-7. **❌ Ecosystem**
+4. **❌ Ecosystem**
    - No plugin system
    - No marketplace
    - No third-party integrations
 
-8. **❌ Documentation**
+5. **❌ Documentation**
    - README only
    - No tutorials
    - No video guides
@@ -458,7 +472,7 @@
 | **Disk Space** | ~5MB | 300MB+ | ~2MB |
 | **Request Execution** | Fast (direct HTTP) | Fast (native) | Fast (browser) |
 | **Database Queries** | SQLite (fast) | Cloud API (network) | None |
-| **Concurrent Users** | 1 (single-user) | Unlimited (cloud) | Unlimited |
+| **Concurrent Users** | Multi-user (self-hosted) | Unlimited (cloud) | Unlimited |
 
 ---
 
@@ -495,13 +509,15 @@
 - Python developers who want Python scripting
 - Mobile API testing (responsive UI)
 - Developers who want complete data ownership
+- Small teams needing collaboration without per-seat costs
+- DevOps teams needing CI/CD integration and API monitoring
 
 ### **Postman is BEST for:**
-- Large teams needing collaboration
+- Large teams needing real-time collaboration and sync
 - Enterprise environments with budgets
-- API lifecycle management
-- Automated monitoring and testing
-- Teams wanting cloud sync and backup
+- API lifecycle management with audit trails
+- Teams wanting cloud sync and hosted docs
+- Organizations requiring SSO/SAML integration
 
 ### **OpenAPI is BEST for:**
 - API design-first workflows
@@ -525,7 +541,8 @@ Simple ────────────────────────�
   │                                                  │
 Swagger UI    RequestLab        Postman         Enterprise
 (Read-only)   (Self-hosted      (Cloud          API Platforms
-              testing)          platform)       (Kong, Apigee)
+              testing +         platform)       (Kong, Apigee)
+              teams + monitor)
 ```
 
 ### **Cost Spectrum:**
@@ -551,25 +568,23 @@ RequestLab    Swagger UI        Postman         Cloud-only
 ### **Roadmap Suggestions:**
 
 #### **High Priority:**
-1. Team collaboration (WebSocket sync)
-2. API documentation generator
-3. Code generation (Python, JavaScript, cURL)
-4. CI/CD integration (CLI mode)
-5. Backup/restore functionality
+1. Real-time collaboration (WebSocket sync)
+2. Request chaining / workflows
+3. Data-driven testing (CSV/JSON imports)
+4. Plugin system
 
 #### **Medium Priority:**
-6. Plugin system
-7. Advanced authentication (OAuth flows)
-8. Request chaining
-9. Data-driven testing (CSV/JSON imports)
-10. API monitoring
+5. Cloud sync option
+6. Advanced authentication (interactive OAuth flows)
+7. GraphQL schema import
+8. Postman workspace import
+9. API analytics dashboard
 
 #### **Low Priority:**
-11. Cloud sync option
-12. Mobile app (React Native)
-13. GraphQL schema import
-14. Postman workspace import
-15. API analytics dashboard
+10. Mobile app (React Native)
+11. CLI tool for headless execution
+12. Webhook notifications for monitors
+13. Rate limiting / throttling simulation
 
 ---
 
@@ -582,14 +597,21 @@ RequestLab    Swagger UI        Postman         Cloud-only
 - ✅ **Python-powered** scripting (unique advantage)
 - ✅ **Mobile-friendly** responsive design (Postman lacks this)
 - ✅ **100% free** with no limitations
+- ✅ **Team collaboration** with roles and shared collections
+- ✅ **API monitoring** with uptime tracking
+- ✅ **Code generation** for 10+ languages
+- ✅ **CI/CD integration** with test suites and CI tokens
+- ✅ **API documentation** generator (OpenAPI, Markdown, HTML)
+- ✅ **Backup & restore** for full workspace portability
 
 **It's NOT trying to replace Postman** for enterprise teams, but rather provides a **lean, fast, private alternative** for developers who:
 
-- Don't need cloud features
+- Don't need real-time cloud sync
 - Value data ownership
 - Prefer simplicity over complexity
 - Want Python scripting capabilities
 - Work in restricted/offline environments
+- Need team collaboration without per-seat costs
 
 **OpenAPI and Swagger** serve different purposes (specification and documentation) and can actually **complement RequestLab** by:
 
@@ -597,7 +619,7 @@ RequestLab    Swagger UI        Postman         Cloud-only
 - Using RequestLab to test APIs documented with Swagger
 - Combining all three tools in a complete API workflow
 
-**Bottom Line**: RequestLab is the perfect tool for **individual developers and small teams** who want a **fast, private, and free** API testing experience without the overhead of commercial platforms. 🎯
+**Bottom Line**: RequestLab is the perfect tool for **individual developers and small teams** who want a **fast, private, and free** API testing experience with team collaboration, monitoring, code generation, and CI/CD integration — without the overhead of commercial platforms. 🎯
 
 ---
 
@@ -679,6 +701,6 @@ paths:
 
 ---
 
-**Document Version**: 1.0  
-**Last Updated**: May 28, 2026  
+**Document Version**: 2.0  
+**Last Updated**: June 1, 2026  
 **Author**: RequestLab Team  

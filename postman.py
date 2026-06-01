@@ -317,6 +317,131 @@ def init_db():
         except Exception:
             pass
 
+        # ── Team Collaboration tables ──
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS teams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                created TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS team_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role TEXT DEFAULT 'viewer',
+                invited_at TEXT DEFAULT (datetime('now')),
+                joined_at TEXT,
+                UNIQUE(team_id, user_id)
+            );
+            CREATE TABLE IF NOT EXISTS shared_collections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+                shared_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                shared_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(team_id, collection_id)
+            );
+        """)
+
+        # ── Advanced Testing / CI/CD tables ──
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS test_suites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                collection_ids TEXT DEFAULT '[]',
+                schedule_cron TEXT DEFAULT '',
+                last_run TEXT,
+                status TEXT DEFAULT 'idle',
+                created TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS test_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                suite_id INTEGER REFERENCES test_suites(id) ON DELETE CASCADE,
+                run_id INTEGER,
+                status TEXT DEFAULT 'running',
+                total INTEGER DEFAULT 0,
+                passed INTEGER DEFAULT 0,
+                failed INTEGER DEFAULT 0,
+                duration_ms REAL DEFAULT 0,
+                triggered_by TEXT DEFAULT 'manual',
+                details TEXT DEFAULT '[]',
+                started_at TEXT DEFAULT (datetime('now')),
+                finished_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS ci_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                token TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                created TEXT DEFAULT (datetime('now')),
+                last_used TEXT
+            );
+        """)
+
+        # ── API Documentation table ──
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS api_docs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                collection_id INTEGER REFERENCES collections(id) ON DELETE CASCADE,
+                content TEXT DEFAULT '{}',
+                updated TEXT DEFAULT (datetime('now')),
+                UNIQUE(collection_id)
+            );
+        """)
+
+        # ── API Monitors table ──
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS monitors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL,
+                method TEXT DEFAULT 'GET',
+                headers TEXT DEFAULT '[]',
+                body_type TEXT DEFAULT 'none',
+                body_content TEXT DEFAULT '',
+                interval_seconds INTEGER DEFAULT 300,
+                expected_status INTEGER DEFAULT 200,
+                expected_body TEXT DEFAULT '',
+                enabled INTEGER DEFAULT 1,
+                last_status TEXT DEFAULT 'never',
+                last_check TEXT,
+                last_duration_ms REAL,
+                uptime_pct REAL DEFAULT 100.0,
+                total_checks INTEGER DEFAULT 0,
+                total_failures INTEGER DEFAULT 0,
+                created TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS monitor_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
+                status TEXT DEFAULT 'success',
+                status_code INTEGER,
+                duration_ms REAL,
+                response_body TEXT DEFAULT '',
+                error TEXT DEFAULT '',
+                checked_at TEXT DEFAULT (datetime('now'))
+            );
+        """)
+
+        # Migration: add pre_processor / post_processor to requests
+        try:
+            conn.execute("ALTER TABLE requests ADD COLUMN pre_processor TEXT DEFAULT ''")
+            conn.execute("ALTER TABLE requests ADD COLUMN post_processor TEXT DEFAULT ''")
+            conn.commit()
+        except Exception:
+            pass
+
+        # Migration: add cookies column to requests
+        try:
+            conn.execute("ALTER TABLE requests ADD COLUMN cookies TEXT DEFAULT '[]'")
+            conn.commit()
+        except Exception:
+            pass
+
 init_db()
 
 
@@ -634,6 +759,7 @@ def execute_request():
     url         = data.get("url", "").strip()
     params_list = data.get("params", [])
     headers_list= data.get("headers", [])
+    cookies_list= data.get("cookies", [])
     body_type   = data.get("body_type", "none")
     body_content= data.get("body_content", "")
     auth_type   = data.get("auth_type", "none")
@@ -646,6 +772,7 @@ def execute_request():
 
     params  = {p["key"]: p["value"] for p in params_list  if p.get("key") and p.get("enabled", True)}
     headers = {h["key"]: h["value"] for h in headers_list if h.get("key") and h.get("enabled", True)}
+    cookies = {c["key"]: c["value"] for c in cookies_list if c.get("key") and c.get("enabled", True)}
 
     auth = None
     if auth_type == "basic":
@@ -707,6 +834,8 @@ def execute_request():
     pre_request_script = data.get("pre_request_script", "")
     test_script = data.get("test_script", "")
     script_language = data.get("script_language", "javascript")
+    pre_processor = data.get("pre_processor", "")
+    post_processor = data.get("post_processor", "")
     
     # Load active environment variables
     env_vars = {}
@@ -779,6 +908,7 @@ def execute_request():
             method=method, url=url, params=params, headers=headers,
             json=req_json, data=form_data or req_body, files=req_files,
             auth=auth, timeout=timeout, allow_redirects=True, verify=True,
+            cookies=cookies if cookies else None,
         )
         duration_ms = (time.time() - start) * 1000
         try:    resp_body = resp.text
@@ -810,7 +940,6 @@ def execute_request():
             result["script_error"] = test_context.get("script_error")
             # Update environment/globals if modified
             if test_context.get("environment") != env_vars:
-                # Save updated environment to DB
                 try:
                     with get_db() as conn:
                         conn.execute("UPDATE environments SET vars=? WHERE user_id=? AND active=1",
@@ -819,6 +948,32 @@ def execute_request():
                     pass
         else:
             result["test_results"] = []
+
+        # Execute pre-processor (before request - can modify request data)
+        if pre_processor and script_language == "python":
+            pre_proc_context = {
+                "request": {"method": method, "url": url, "headers": headers, "params": params},
+                "environment": env_vars.copy(),
+                "globals": global_vars.copy(),
+                "assertions": []
+            }
+            pre_proc_context = execute_python_script(pre_processor, pre_proc_context)
+            result["pre_processor_output"] = pre_proc_context.get("script_error") or pre_proc_context.get("assertions", [])
+            if pre_proc_context.get("environment") != env_vars:
+                env_vars = pre_proc_context["environment"]
+
+        # Execute post-processor (after response - can transform/validate response)
+        if post_processor and script_language == "python":
+            post_proc_context = {
+                "request": {"method": method, "url": url},
+                "response": result,
+                "environment": env_vars.copy(),
+                "globals": global_vars.copy(),
+                "assertions": []
+            }
+            post_proc_context = execute_python_script(post_processor, post_proc_context)
+            result["post_processor_output"] = post_proc_context.get("script_error") or post_proc_context.get("assertions", [])
+            result["test_results"].extend(post_proc_context.get("assertions", []))
         with get_db() as conn:
             conn.execute(
                 "INSERT INTO history (user_id,method,url,status_code,duration_ms,request_data,response_data) VALUES (?,?,?,?,?,?,?)",
@@ -1401,11 +1556,12 @@ def save_request():
         col = conn.execute("SELECT user_id FROM collections WHERE id=?", (cid,)).fetchone()
         if not col or col["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
         rid = conn.execute(
-            "INSERT INTO requests (collection_id,folder_id,name,method,url,params,headers,body_type,body_content,auth_type,auth_data) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO requests (collection_id,folder_id,name,method,url,params,headers,body_type,body_content,auth_type,auth_data,cookies,pre_processor,post_processor) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (cid, d.get("folder_id"), d.get("name","Untitled"), d.get("method","GET"),
              d.get("url",""), json.dumps(d.get("params",[])), json.dumps(d.get("headers",[])),
              d.get("body_type","none"), d.get("body_content",""),
-             d.get("auth_type","none"), json.dumps(d.get("auth_data",{})))
+             d.get("auth_type","none"), json.dumps(d.get("auth_data",{})),
+             json.dumps(d.get("cookies",[])), d.get("pre_processor",""), d.get("post_processor",""))
         ).lastrowid
     return jsonify({"id": rid, "ok": True})
 
@@ -1423,6 +1579,7 @@ def get_request(rid):
     d["params"]    = json.loads(d["params"])
     d["headers"]   = json.loads(d["headers"])
     d["auth_data"] = json.loads(d["auth_data"])
+    d["cookies"]   = json.loads(d.get("cookies") or "[]")
     return jsonify(d)
 
 @app.route("/api/requests/<int:rid>", methods=["PUT"])
@@ -1434,12 +1591,13 @@ def update_request(rid):
         r = conn.execute("SELECT c.user_id FROM requests r JOIN collections c ON r.collection_id = c.id WHERE r.id=?", (rid,)).fetchone()
         if not r or r["user_id"] != uid: return jsonify({"error": "Unauthorized"}), 403
         conn.execute(
-            "UPDATE requests SET name=?,method=?,url=?,params=?,headers=?,body_type=?,body_content=?,auth_type=?,auth_data=?,folder_id=? WHERE id=?",
+            "UPDATE requests SET name=?,method=?,url=?,params=?,headers=?,body_type=?,body_content=?,auth_type=?,auth_data=?,folder_id=?,cookies=?,pre_processor=?,post_processor=? WHERE id=?",
             (d.get("name","Untitled"), d.get("method","GET"), d.get("url",""),
              json.dumps(d.get("params",[])), json.dumps(d.get("headers",[])),
              d.get("body_type","none"), d.get("body_content",""),
              d.get("auth_type","none"), json.dumps(d.get("auth_data",{})),
-             d.get("folder_id"), rid)
+             d.get("folder_id"), json.dumps(d.get("cookies",[])),
+             d.get("pre_processor",""), d.get("post_processor",""), rid)
         )
     return jsonify({"ok": True})
 
@@ -1574,6 +1732,1271 @@ def delete_environment(eid):
     with get_db() as conn:
         conn.execute("DELETE FROM environments WHERE id=?", (eid,))
     return jsonify({"ok": True})
+
+
+# ─── Team Collaboration ──────────────────────────────────────────────────────────
+
+@app.route("/api/teams", methods=["POST"])
+def create_team():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    name = d.get("name", "New Team").strip()
+    if not name: return jsonify({"error": "Team name required"}), 400
+    with get_db() as conn:
+        tid = conn.execute("INSERT INTO teams (name, owner_id) VALUES (?,?)", (name, uid)).lastrowid
+        conn.execute("INSERT INTO team_members (team_id,user_id,role,joined_at) VALUES (?,?,?,datetime('now'))",
+                     (tid, uid, 'owner'))
+    return jsonify({"id": tid, "name": name, "role": "owner"})
+
+@app.route("/api/teams", methods=["GET"])
+def list_teams():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT t.id, t.name, t.owner_id, t.created, tm.role,
+                   (SELECT COUNT(*) FROM team_members WHERE team_id=t.id) as member_count
+            FROM teams t JOIN team_members tm ON t.id=tm.team_id
+            WHERE tm.user_id=?
+            ORDER BY t.created DESC
+        """, (uid,)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/teams/<int:tid>", methods=["GET"])
+def get_team(tid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        team = conn.execute("SELECT * FROM teams WHERE id=?", (tid,)).fetchone()
+        if not team: return jsonify({"error": "Not found"}), 404
+        is_member = conn.execute("SELECT 1 FROM team_members WHERE team_id=? AND user_id=?", (tid, uid)).fetchone()
+        if not is_member: return jsonify({"error": "Forbidden"}), 403
+        members = conn.execute("""
+            SELECT u.id, u.username, u.email, u.avatar_color, tm.role, tm.joined_at
+            FROM team_members tm JOIN users u ON tm.user_id=u.id
+            WHERE tm.team_id=?
+        """, (tid,)).fetchall()
+        shared = conn.execute("""
+            SELECT sc.collection_id, c.name, sc.shared_at, u.username as shared_by_name
+            FROM shared_collections sc
+            JOIN collections c ON sc.collection_id=c.id
+            LEFT JOIN users u ON sc.shared_by=u.id
+            WHERE sc.team_id=?
+        """, (tid,)).fetchall()
+    return jsonify({
+        "team": dict(team),
+        "members": [dict(m) for m in members],
+        "shared_collections": [dict(s) for s in shared]
+    })
+
+@app.route("/api/teams/<int:tid>", methods=["PUT"])
+def update_team(tid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    with get_db() as conn:
+        team = conn.execute("SELECT * FROM teams WHERE id=?", (tid,)).fetchone()
+        if not team or team["owner_id"] != uid:
+            return jsonify({"error": "Only owner can update team"}), 403
+        conn.execute("UPDATE teams SET name=? WHERE id=?", (d.get("name", team["name"]), tid))
+    return jsonify({"ok": True})
+
+@app.route("/api/teams/<int:tid>", methods=["DELETE"])
+def delete_team(tid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        team = conn.execute("SELECT * FROM teams WHERE id=?", (tid,)).fetchone()
+        if not team or team["owner_id"] != uid:
+            return jsonify({"error": "Only owner can delete team"}), 403
+        conn.execute("DELETE FROM teams WHERE id=?", (tid,))
+    return jsonify({"ok": True})
+
+@app.route("/api/teams/<int:tid>/invite", methods=["POST"])
+def invite_team_member(tid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    email = d.get("email", "").strip()
+    role = d.get("role", "viewer")
+    if role not in ('admin', 'editor', 'viewer'):
+        return jsonify({"error": "Invalid role"}), 400
+    if not email: return jsonify({"error": "Email required"}), 400
+    with get_db() as conn:
+        my_role = conn.execute("SELECT role FROM team_members WHERE team_id=? AND user_id=?", (tid, uid)).fetchone()
+        if not my_role or my_role["role"] not in ('owner', 'admin'):
+            return jsonify({"error": "Insufficient permissions"}), 403
+        user = conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if not user:
+            return jsonify({"error": "User not found with that email"}), 404
+        existing = conn.execute("SELECT id FROM team_members WHERE team_id=? AND user_id=?", (tid, user["id"])).fetchone()
+        if existing:
+            return jsonify({"error": "User already a member"}), 400
+        conn.execute("INSERT INTO team_members (team_id,user_id,role,joined_at) VALUES (?,?,?,datetime('now'))",
+                     (tid, user["id"], role))
+    return jsonify({"ok": True, "user_id": user["id"]})
+
+@app.route("/api/teams/<int:tid>/members/<int:member_uid>", methods=["PUT"])
+def update_team_member_role(tid, member_uid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    role = d.get("role", "viewer")
+    if role not in ('admin', 'editor', 'viewer'):
+        return jsonify({"error": "Invalid role"}), 400
+    with get_db() as conn:
+        my_role = conn.execute("SELECT role FROM team_members WHERE team_id=? AND user_id=?", (tid, uid)).fetchone()
+        if not my_role or my_role["role"] != 'owner':
+            return jsonify({"error": "Only owner can change roles"}), 403
+        conn.execute("UPDATE team_members SET role=? WHERE team_id=? AND user_id=?", (role, tid, member_uid))
+    return jsonify({"ok": True})
+
+@app.route("/api/teams/<int:tid>/members/<int:member_uid>", methods=["DELETE"])
+def remove_team_member(tid, member_uid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        my_role = conn.execute("SELECT role FROM team_members WHERE team_id=? AND user_id=?", (tid, uid)).fetchone()
+        team = conn.execute("SELECT owner_id FROM teams WHERE id=?", (tid,)).fetchone()
+        if not team: return jsonify({"error": "Not found"}), 404
+        if uid != member_uid and (not my_role or my_role["role"] not in ('owner', 'admin')):
+            return jsonify({"error": "Insufficient permissions"}), 403
+        if member_uid == team["owner_id"]:
+            return jsonify({"error": "Cannot remove owner"}), 400
+        conn.execute("DELETE FROM team_members WHERE team_id=? AND user_id=?", (tid, member_uid))
+    return jsonify({"ok": True})
+
+@app.route("/api/teams/<int:tid>/leave", methods=["POST"])
+def leave_team(tid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        team = conn.execute("SELECT owner_id FROM teams WHERE id=?", (tid,)).fetchone()
+        if not team: return jsonify({"error": "Not found"}), 404
+        if team["owner_id"] == uid:
+            return jsonify({"error": "Owner must delete team, not leave"}), 400
+        conn.execute("DELETE FROM team_members WHERE team_id=? AND user_id=?", (tid, uid))
+    return jsonify({"ok": True})
+
+@app.route("/api/teams/<int:tid>/collections", methods=["POST"])
+def share_collection_with_team(tid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    collection_id = d.get("collection_id")
+    if not collection_id: return jsonify({"error": "collection_id required"}), 400
+    with get_db() as conn:
+        my_role = conn.execute("SELECT role FROM team_members WHERE team_id=? AND user_id=?", (tid, uid)).fetchone()
+        if not my_role or my_role["role"] not in ('owner', 'admin', 'editor'):
+            return jsonify({"error": "Insufficient permissions"}), 403
+        col = conn.execute("SELECT user_id FROM collections WHERE id=?", (collection_id,)).fetchone()
+        if not col or col["user_id"] != uid:
+            return jsonify({"error": "You don't own this collection"}), 403
+        try:
+            conn.execute("INSERT INTO shared_collections (team_id,collection_id,shared_by) VALUES (?,?,?)",
+                         (tid, collection_id, uid))
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "Already shared"}), 400
+    return jsonify({"ok": True})
+
+@app.route("/api/teams/<int:tid>/collections", methods=["GET"])
+def list_team_collections(tid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        is_member = conn.execute("SELECT 1 FROM team_members WHERE team_id=? AND user_id=?", (tid, uid)).fetchone()
+        if not is_member: return jsonify({"error": "Forbidden"}), 403
+        rows = conn.execute("""
+            SELECT c.id, c.name, sc.shared_at, u.username as shared_by_name
+            FROM shared_collections sc
+            JOIN collections c ON sc.collection_id=c.id
+            LEFT JOIN users u ON sc.shared_by=u.id
+            WHERE sc.team_id=?
+        """, (tid,)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/teams/<int:tid>/collections/<int:cid>", methods=["DELETE"])
+def unshare_collection(tid, cid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        my_role = conn.execute("SELECT role FROM team_members WHERE team_id=? AND user_id=?", (tid, uid)).fetchone()
+        if not my_role or my_role["role"] not in ('owner', 'admin'):
+            return jsonify({"error": "Insufficient permissions"}), 403
+        conn.execute("DELETE FROM shared_collections WHERE team_id=? AND collection_id=?", (tid, cid))
+    return jsonify({"ok": True})
+
+
+# ─── Advanced Testing / CI/CD ──────────────────────────────────────────────────
+
+def require_ci_token():
+    """Authenticate via CI token from X-CI-Token header"""
+    token = request.headers.get("X-CI-Token", "")
+    if not token:
+        return None
+    with get_db() as conn:
+        row = conn.execute("SELECT user_id FROM ci_tokens WHERE token=?", (token,)).fetchone()
+        if row:
+            conn.execute("UPDATE ci_tokens SET last_used=datetime('now') WHERE token=?", (token,))
+            return row["user_id"]
+    return None
+
+@app.route("/api/test-suites", methods=["POST"])
+def create_test_suite():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    name = d.get("name", "New Test Suite").strip()
+    collection_ids = json.dumps(d.get("collection_ids", []))
+    with get_db() as conn:
+        sid = conn.execute("INSERT INTO test_suites (user_id,name,collection_ids) VALUES (?,?,?)",
+                           (uid, name, collection_ids)).lastrowid
+    return jsonify({"id": sid, "name": name, "collection_ids": d.get("collection_ids", [])})
+
+@app.route("/api/test-suites", methods=["GET"])
+def list_test_suites():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM test_suites WHERE user_id=? ORDER BY created DESC", (uid,)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["collection_ids"] = json.loads(d["collection_ids"]) if isinstance(d["collection_ids"], str) else []
+        result.append(d)
+    return jsonify(result)
+
+@app.route("/api/test-suites/<int:sid>", methods=["PUT"])
+def update_test_suite(sid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    with get_db() as conn:
+        suite = conn.execute("SELECT user_id FROM test_suites WHERE id=?", (sid,)).fetchone()
+        if not suite or suite["user_id"] != uid:
+            return jsonify({"error": "Forbidden"}), 403
+        conn.execute("UPDATE test_suites SET name=?, collection_ids=? WHERE id=?",
+                     (d.get("name", ""), json.dumps(d.get("collection_ids", [])), sid))
+    return jsonify({"ok": True})
+
+@app.route("/api/test-suites/<int:sid>", methods=["DELETE"])
+def delete_test_suite(sid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        suite = conn.execute("SELECT user_id FROM test_suites WHERE id=?", (sid,)).fetchone()
+        if not suite or suite["user_id"] != uid:
+            return jsonify({"error": "Forbidden"}), 403
+        conn.execute("DELETE FROM test_suites WHERE id=?", (sid,))
+    return jsonify({"ok": True})
+
+@app.route("/api/test-suites/<int:sid>/run", methods=["POST"])
+def run_test_suite(sid):
+    uid = require_auth() or require_ci_token()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    triggered_by = request.json.get("triggered_by", "manual") if request.json else "manual"
+    with get_db() as conn:
+        suite = conn.execute("SELECT * FROM test_suites WHERE id=?", (sid,)).fetchone()
+        if not suite: return jsonify({"error": "Not found"}), 404
+        if suite["user_id"] != uid: return jsonify({"error": "Forbidden"}), 403
+        col_ids = json.loads(suite["collection_ids"]) if isinstance(suite["collection_ids"], str) else []
+        if not col_ids:
+            return jsonify({"error": "No collections in suite"}), 400
+        conn.execute("UPDATE test_suites SET status='running', last_run=datetime('now') WHERE id=?", (sid,))
+        result_id = conn.execute(
+            "INSERT INTO test_results (suite_id,status,triggered_by) VALUES (?,?,?)",
+            (sid, 'running', triggered_by)
+        ).lastrowid
+    total_passed = 0
+    total_failed = 0
+    total_requests = 0
+    all_results = []
+    env_vars, global_vars = {}, {}
+    with get_db() as conn:
+        active_env = conn.execute("SELECT vars FROM environments WHERE user_id=? AND active=1", (uid,)).fetchone()
+        if active_env and active_env["vars"]:
+            try: env_vars = json.loads(active_env["vars"])
+            except: pass
+        user_row = conn.execute("SELECT global_vars FROM users WHERE id=?", (uid,)).fetchone()
+        if user_row and user_row["global_vars"]:
+            try: global_vars = json.loads(user_row["global_vars"])
+            except: pass
+    start_time = time.time()
+    for col_id in col_ids:
+        with get_db() as conn:
+            reqs = conn.execute("SELECT * FROM requests WHERE collection_id=? ORDER BY id", (col_id,)).fetchall()
+            col = conn.execute("SELECT name FROM collections WHERE id=?", (col_id,)).fetchone()
+        col_name = col["name"] if col else f"Collection {col_id}"
+        for req in reqs:
+            req_data = {
+                "method": req["method"], "url": req["url"],
+                "params": json.loads(req["params"]) if req["params"] else [],
+                "headers": json.loads(req["headers"]) if req["headers"] else [],
+                "body_type": req["body_type"], "body_content": req["body_content"],
+                "auth_type": req["auth_type"], "auth_data": json.loads(req["auth_data"]) if req["auth_data"] else {},
+                "pre_request_script": req["pre_request_script"] or "",
+                "test_script": req["test_script"] or "",
+                "script_language": req["script_language"] or "javascript",
+            }
+            try:
+                result = execute_single_request(req_data, env_vars, global_vars)
+                test_results = result.get("test_results", [])
+                passed = sum(1 for t in test_results if t.get("passed"))
+                failed = sum(1 for t in test_results if not t.get("passed"))
+                total_passed += passed
+                total_failed += failed
+                total_requests += 1
+                all_results.append({
+                    "collection": col_name, "request": req["name"],
+                    "status_code": result.get("status_code"),
+                    "duration_ms": result.get("duration_ms"),
+                    "passed": passed, "failed": failed,
+                    "tests": test_results
+                })
+                if "updated_env" in result:
+                    env_vars = result["updated_env"]
+            except Exception as e:
+                total_failed += 1
+                total_requests += 1
+                all_results.append({
+                    "collection": col_name, "request": req["name"],
+                    "error": str(e), "passed": 0, "failed": 1, "tests": []
+                })
+    duration_ms = (time.time() - start_time) * 1000
+    status = "passed" if total_failed == 0 else "failed"
+    with get_db() as conn:
+        conn.execute("""
+            UPDATE test_results SET status=?, total=?, passed=?, failed=?, duration_ms=?,
+            details=?, finished_at=datetime('now') WHERE id=?
+        """, (status, total_requests, total_passed, total_failed, round(duration_ms, 2),
+              json.dumps(all_results), result_id))
+        conn.execute("UPDATE test_suites SET status=? WHERE id=?", (status, sid))
+    return jsonify({
+        "result_id": result_id, "status": status,
+        "summary": {"total": total_requests, "passed": total_passed, "failed": total_failed,
+                     "duration_ms": round(duration_ms, 2)},
+        "results": all_results
+    })
+
+@app.route("/api/test-results", methods=["GET"])
+def list_test_results():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    suite_id = request.args.get("suite_id")
+    limit = request.args.get("limit", 50, type=int)
+    with get_db() as conn:
+        if suite_id:
+            rows = conn.execute(
+                "SELECT tr.* FROM test_results tr JOIN test_suites ts ON tr.suite_id=ts.id WHERE ts.user_id=? AND tr.suite_id=? ORDER BY tr.started_at DESC LIMIT ?",
+                (uid, suite_id, limit)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT tr.* FROM test_results tr JOIN test_suites ts ON tr.suite_id=ts.id WHERE ts.user_id=? ORDER BY tr.started_at DESC LIMIT ?",
+                (uid, limit)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["details"] = json.loads(d["details"]) if isinstance(d["details"], str) else []
+        result.append(d)
+    return jsonify(result)
+
+def _generate_junit_xml(test_result):
+    """Generate JUnit XML from a test result row"""
+    details = json.loads(test_result["details"]) if isinstance(test_result["details"], str) else test_result["details"]
+    total = test_result["total"]
+    failures = test_result["failed"]
+    duration = (test_result["duration_ms"] or 0) / 1000.0
+    xml = ['<?xml version="1.0" encoding="UTF-8"?>']
+    xml.append(f'<testsuites tests="{total}" failures="{failures}" time="{duration:.3f}">')
+    xml.append(f'  <testsuite name="RequestLab Test Suite" tests="{total}" failures="{failures}" time="{duration:.3f}">')
+    for r in details:
+        req_name = r.get("request", "Unknown")
+        col_name = r.get("collection", "Default")
+        req_time = (r.get("duration_ms") or 0) / 1000.0
+        xml.append(f'    <testcase classname="{col_name}" name="{req_name}" time="{req_time:.3f}">')
+        if r.get("error"):
+            xml.append(f'      <failure message="{r["error"]}">{r["error"]}</failure>')
+        elif r.get("failed", 0) > 0:
+            failed_tests = [t for t in r.get("tests", []) if not t.get("passed")]
+            msgs = "; ".join(t.get("name", "") + ": " + str(t.get("error", t.get("expected", ""))) for t in failed_tests)
+            xml.append(f'      <failure message="{msgs}">{msgs}</failure>')
+        xml.append('    </testcase>')
+    xml.append('  </testsuite>')
+    xml.append('</testsuites>')
+    return "\n".join(xml)
+
+@app.route("/api/ci/tokens", methods=["POST"])
+def create_ci_token():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    name = d.get("name", "CI Token").strip()
+    token = secrets.token_urlsafe(48)
+    with get_db() as conn:
+        tid = conn.execute("INSERT INTO ci_tokens (user_id,token,name) VALUES (?,?,?)",
+                           (uid, token, name)).lastrowid
+    return jsonify({"id": tid, "token": token, "name": name})
+
+@app.route("/api/ci/tokens", methods=["GET"])
+def list_ci_tokens():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, name, created, last_used FROM ci_tokens WHERE user_id=?", (uid,)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/ci/tokens/<int:token_id>", methods=["DELETE"])
+def delete_ci_token(token_id):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        tok = conn.execute("SELECT user_id FROM ci_tokens WHERE id=?", (token_id,)).fetchone()
+        if not tok or tok["user_id"] != uid:
+            return jsonify({"error": "Forbidden"}), 403
+        conn.execute("DELETE FROM ci_tokens WHERE id=?", (token_id,))
+    return jsonify({"ok": True})
+
+@app.route("/api/ci/run", methods=["POST"])
+def ci_run_suite():
+    """CI endpoint - authenticates via X-CI-Token header"""
+    uid = require_ci_token()
+    if not uid: return jsonify({"error": "Invalid CI token"}), 401
+    d = request.json or {}
+    suite_id = d.get("suite_id")
+    if not suite_id: return jsonify({"error": "suite_id required"}), 400
+    with get_db() as conn:
+        suite = conn.execute("SELECT * FROM test_suites WHERE id=? AND user_id=?", (suite_id, uid)).fetchone()
+        if not suite: return jsonify({"error": "Suite not found"}), 404
+    # Run suite inline (reuse logic)
+    col_ids = json.loads(suite["collection_ids"]) if isinstance(suite["collection_ids"], str) else []
+    with get_db() as conn:
+        conn.execute("UPDATE test_suites SET status='running', last_run=datetime('now') WHERE id=?", (suite_id,))
+        result_id = conn.execute(
+            "INSERT INTO test_results (suite_id,status,triggered_by) VALUES (?,?,?)",
+            (suite_id, 'running', 'ci')
+        ).lastrowid
+    total_passed = 0
+    total_failed = 0
+    total_requests = 0
+    all_results = []
+    env_vars, global_vars = {}, {}
+    with get_db() as conn:
+        active_env = conn.execute("SELECT vars FROM environments WHERE user_id=? AND active=1", (uid,)).fetchone()
+        if active_env and active_env["vars"]:
+            try: env_vars = json.loads(active_env["vars"])
+            except: pass
+    start_time = time.time()
+    for col_id in col_ids:
+        with get_db() as conn:
+            reqs = conn.execute("SELECT * FROM requests WHERE collection_id=? ORDER BY id", (col_id,)).fetchall()
+            col = conn.execute("SELECT name FROM collections WHERE id=?", (col_id,)).fetchone()
+        col_name = col["name"] if col else f"Collection {col_id}"
+        for req in reqs:
+            req_data = {
+                "method": req["method"], "url": req["url"],
+                "params": json.loads(req["params"]) if req["params"] else [],
+                "headers": json.loads(req["headers"]) if req["headers"] else [],
+                "body_type": req["body_type"], "body_content": req["body_content"],
+                "auth_type": req["auth_type"], "auth_data": json.loads(req["auth_data"]) if req["auth_data"] else {},
+                "pre_request_script": req["pre_request_script"] or "",
+                "test_script": req["test_script"] or "",
+                "script_language": req["script_language"] or "javascript",
+            }
+            try:
+                result = execute_single_request(req_data, env_vars, global_vars)
+                test_results = result.get("test_results", [])
+                passed = sum(1 for t in test_results if t.get("passed"))
+                failed = sum(1 for t in test_results if not t.get("passed"))
+                total_passed += passed
+                total_failed += failed
+                total_requests += 1
+                all_results.append({"collection": col_name, "request": req["name"],
+                    "status_code": result.get("status_code"), "duration_ms": result.get("duration_ms"),
+                    "passed": passed, "failed": failed, "tests": test_results})
+                if "updated_env" in result: env_vars = result["updated_env"]
+            except Exception as e:
+                total_failed += 1
+                total_requests += 1
+                all_results.append({"collection": col_name, "request": req["name"], "error": str(e), "passed": 0, "failed": 1, "tests": []})
+    duration_ms = (time.time() - start_time) * 1000
+    status = "passed" if total_failed == 0 else "failed"
+    with get_db() as conn:
+        conn.execute("UPDATE test_results SET status=?, total=?, passed=?, failed=?, duration_ms=?, details=?, finished_at=datetime('now') WHERE id=?",
+                     (status, total_requests, total_passed, total_failed, round(duration_ms, 2), json.dumps(all_results), result_id))
+        conn.execute("UPDATE test_suites SET status=? WHERE id=?", (status, suite_id))
+    fmt = d.get("format", "json")
+    if fmt == "junit":
+        tr = {"details": json.dumps(all_results), "total": total_requests, "failed": total_failed, "duration_ms": round(duration_ms, 2)}
+        xml = _generate_junit_xml(tr)
+        return Response(xml, mimetype="application/xml", headers={"Content-Disposition": "attachment; filename=results.xml"})
+    return jsonify({"result_id": result_id, "status": status,
+                    "summary": {"total": total_requests, "passed": total_passed, "failed": total_failed, "duration_ms": round(duration_ms, 2)},
+                    "results": all_results})
+
+@app.route("/api/ci/run/<int:rid>/junit", methods=["GET"])
+def ci_export_junit(rid):
+    uid = require_auth() or require_ci_token()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        tr = conn.execute("SELECT tr.* FROM test_results tr JOIN test_suites ts ON tr.suite_id=ts.id WHERE tr.id=? AND ts.user_id=?", (rid, uid)).fetchone()
+        if not tr: return jsonify({"error": "Not found"}), 404
+    xml = _generate_junit_xml(dict(tr))
+    return Response(xml, mimetype="application/xml", headers={"Content-Disposition": f"attachment; filename=result_{rid}.xml"})
+
+@app.route("/api/ci/run/<int:rid>/json", methods=["GET"])
+def ci_export_json(rid):
+    uid = require_auth() or require_ci_token()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        tr = conn.execute("SELECT tr.* FROM test_results tr JOIN test_suites ts ON tr.suite_id=ts.id WHERE tr.id=? AND ts.user_id=?", (rid, uid)).fetchone()
+        if not tr: return jsonify({"error": "Not found"}), 404
+    d = dict(tr)
+    d["details"] = json.loads(d["details"]) if isinstance(d["details"], str) else []
+    return jsonify(d)
+
+
+# ─── API Documentation Generator ────────────────────────────────────────────────
+
+def _generate_openapi_from_collection(collection_id, uid):
+    """Generate OpenAPI 3.0 spec from collection requests"""
+    with get_db() as conn:
+        col = conn.execute("SELECT * FROM collections WHERE id=?", (collection_id,)).fetchone()
+        if not col: return None
+        reqs = conn.execute("SELECT * FROM requests WHERE collection_id=? ORDER BY id", (collection_id,)).fetchall()
+    paths = {}
+    for req in reqs:
+        url = req["url"] or "/"
+        # Extract path from URL
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            path = parsed.path or "/"
+        except:
+            path = "/"
+        method = (req["method"] or "GET").lower()
+        if path not in paths:
+            paths[path] = {}
+        headers_list = json.loads(req["headers"]) if req["headers"] else []
+        params_list = json.loads(req["params"]) if req["params"] else []
+        op = {
+            "summary": req["name"],
+            "operationId": f"{method}_{req['id']}",
+            "parameters": [],
+            "responses": {"200": {"description": "Successful response"}}
+        }
+        for p in params_list:
+            if p.get("key"):
+                op["parameters"].append({"name": p["key"], "in": "query", "schema": {"type": "string"},
+                                          "example": p.get("value", "")})
+        for h in headers_list:
+            if h.get("key") and h["key"].lower() not in ("content-type", "accept"):
+                op["parameters"].append({"name": h["key"], "in": "header", "schema": {"type": "string"},
+                                          "example": h.get("value", "")})
+        if req["body_type"] in ("json", "graphql", "raw", "xml", "soap") and req["body_content"]:
+            body = req["body_content"]
+            schema = {"type": "string"}
+            if req["body_type"] == "json":
+                try:
+                    parsed_body = json.loads(body)
+                    schema = _infer_json_schema(parsed_body)
+                except:
+                    pass
+            ct = "application/json" if req["body_type"] == "json" else "text/plain"
+            op["requestBody"] = {"content": {ct: {"schema": schema}}}
+        if req["auth_type"] and req["auth_type"] != "none":
+            op["security"] = [{req["auth_type"]: []}]
+        paths[path][method] = op
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": col["name"], "version": "1.0.0", "description": f"API documentation for {col['name']}"},
+        "paths": paths
+    }
+    return spec
+
+def _infer_json_schema(obj):
+    """Infer JSON schema from a sample object"""
+    if isinstance(obj, dict):
+        props = {}
+        for k, v in obj.items():
+            props[k] = _infer_json_schema(v)
+        return {"type": "object", "properties": props}
+    elif isinstance(obj, list):
+        item_schema = {"type": "string"}
+        if obj:
+            item_schema = _infer_json_schema(obj[0])
+        return {"type": "array", "items": item_schema}
+    elif isinstance(obj, bool):
+        return {"type": "boolean"}
+    elif isinstance(obj, int):
+        return {"type": "integer"}
+    elif isinstance(obj, float):
+        return {"type": "number"}
+    else:
+        return {"type": "string"}
+
+@app.route("/api/docs/generate", methods=["POST"])
+def generate_docs():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    collection_id = d.get("collection_id")
+    if not collection_id: return jsonify({"error": "collection_id required"}), 400
+    spec = _generate_openapi_from_collection(collection_id, uid)
+    if not spec: return jsonify({"error": "Collection not found"}), 404
+    with get_db() as conn:
+        col = conn.execute("SELECT user_id FROM collections WHERE id=?", (collection_id,)).fetchone()
+        if not col or col["user_id"] != uid:
+            return jsonify({"error": "Forbidden"}), 403
+        existing = conn.execute("SELECT id FROM api_docs WHERE collection_id=?", (collection_id,)).fetchone()
+        if existing:
+            conn.execute("UPDATE api_docs SET content=?, updated=datetime('now') WHERE collection_id=?",
+                         (json.dumps(spec), collection_id))
+        else:
+            conn.execute("INSERT INTO api_docs (user_id, collection_id, content) VALUES (?,?,?)",
+                         (uid, collection_id, json.dumps(spec)))
+    return jsonify(spec)
+
+@app.route("/api/docs/<int:collection_id>", methods=["GET"])
+def get_docs(collection_id):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        doc = conn.execute("SELECT * FROM api_docs WHERE collection_id=? AND user_id=?", (collection_id, uid)).fetchone()
+        if not doc:
+            # Auto-generate
+            spec = _generate_openapi_from_collection(collection_id, uid)
+            if not spec: return jsonify({"error": "Not found"}), 404
+            return jsonify(spec)
+        return json.loads(doc["content"])
+
+@app.route("/api/docs/<int:collection_id>", methods=["PUT"])
+def update_docs(collection_id):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    with get_db() as conn:
+        existing = conn.execute("SELECT id FROM api_docs WHERE collection_id=? AND user_id=?", (collection_id, uid)).fetchone()
+        if existing:
+            conn.execute("UPDATE api_docs SET content=?, updated=datetime('now') WHERE collection_id=?",
+                         (json.dumps(d), collection_id))
+        else:
+            conn.execute("INSERT INTO api_docs (user_id, collection_id, content) VALUES (?,?,?)",
+                         (uid, collection_id, json.dumps(d)))
+    return jsonify({"ok": True})
+
+@app.route("/api/docs/<int:collection_id>/openapi", methods=["GET"])
+def export_openapi(collection_id):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    spec = _generate_openapi_from_collection(collection_id, uid)
+    if not spec: return jsonify({"error": "Not found"}), 404
+    return jsonify(spec)
+
+@app.route("/api/docs/<int:collection_id>/markdown", methods=["GET"])
+def export_markdown(collection_id):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    spec = _generate_openapi_from_collection(collection_id, uid)
+    if not spec: return jsonify({"error": "Not found"}), 404
+    md = [f"# {spec['info']['title']}\n"]
+    md.append(f"{spec['info'].get('description', '')}\n")
+    md.append(f"**Version:** {spec['info']['version']}\n\n")
+    for path, methods in spec.get("paths", {}).items():
+        for method, op in methods.items():
+            md.append(f"## {method.upper()} `{path}`\n")
+            md.append(f"**{op.get('summary', '')}**\n\n")
+            if op.get("parameters"):
+                md.append("### Parameters\n")
+                md.append("| Name | In | Example |")
+                md.append("|------|----|---------|")
+                for p in op["parameters"]:
+                    md.append(f"| {p['name']} | {p['in']} | {p.get('example', '')} |")
+                md.append("")
+            if op.get("requestBody"):
+                md.append("### Request Body\n")
+                for ct, ct_data in op["requestBody"].get("content", {}).items():
+                    md.append(f"Content-Type: `{ct}`\n")
+                    if ct_data.get("schema"):
+                        md.append(f"```json\n{json.dumps(ct_data['schema'], indent=2)}\n```\n")
+            md.append("---\n")
+    text = "\n".join(md)
+    return Response(text, mimetype="text/markdown", headers={"Content-Disposition": f"attachment; filename=api_docs.md"})
+
+@app.route("/api/docs/<int:collection_id>/html", methods=["GET"])
+def export_html_docs(collection_id):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    spec = _generate_openapi_from_collection(collection_id, uid)
+    if not spec: return jsonify({"error": "Not found"}), 404
+    h = [f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{spec['info']['title']} - API Docs</title>
+    <style>body{{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 20px;background:#0d1117;color:#cdd9e5}}
+    h1{{color:#00d4ff}}h2{{color:#79c0ff;border-bottom:1px solid #1e2d3d;padding-bottom:8px}}
+    .method{{display:inline-block;padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px;margin-right:8px}}
+    .get{{background:#1a4a2e;color:#3dd68c}}.post{{background:#1a3a5c;color:#79c0ff}}
+    .put{{background:#4a3a1a;color:#e3b341}}.delete{{background:#4a1a1a;color:#f47067}}
+    .patch{{background:#3a1a4a;color:#d2a8ff}}
+    table{{width:100%;border-collapse:collapse;margin:12px 0}}th,td{{text-align:left;padding:8px 12px;border:1px solid #1e2d3d;font-size:13px}}
+    th{{background:#131920}}code{{background:#131920;padding:2px 6px;border-radius:3px;font-size:13px}}
+    pre{{background:#131920;padding:16px;border-radius:8px;overflow-x:auto;font-size:13px}}
+    .endpoint{{margin:20px 0;padding:16px;border:1px solid #1e2d3d;border-radius:8px}}</style></head><body>"""]
+    h.append(f"<h1>{spec['info']['title']}</h1>")
+    h.append(f"<p>{spec['info'].get('description', '')}</p>")
+    h.append(f"<p><strong>Version:</strong> {spec['info']['version']}</p>")
+    for path, methods in spec.get("paths", {}).items():
+        for method, op in methods.items():
+            h.append(f'<div class="endpoint">')
+            h.append(f'<h2><span class="method {method}">{method.upper()}</span> <code>{path}</code></h2>')
+            h.append(f"<p><strong>{op.get('summary', '')}</strong></p>")
+            if op.get("parameters"):
+                h.append("<h3>Parameters</h3><table><tr><th>Name</th><th>In</th><th>Example</th></tr>")
+                for p in op["parameters"]:
+                    h.append(f"<tr><td>{p['name']}</td><td>{p['in']}</td><td>{p.get('example','')}</td></tr>")
+                h.append("</table>")
+            if op.get("requestBody"):
+                h.append("<h3>Request Body</h3>")
+                for ct, ct_data in op["requestBody"].get("content", {}).items():
+                    h.append(f"<p>Content-Type: <code>{ct}</code></p>")
+                    if ct_data.get("schema"):
+                        h.append(f"<pre>{json.dumps(ct_data['schema'], indent=2)}</pre>")
+            h.append('</div>')
+    h.append("</body></html>")
+    html_out = "\n".join(h)
+    return Response(html_out, mimetype="text/html", headers={"Content-Disposition": f"attachment; filename=api_docs.html"})
+
+
+# ─── Code Generation ──────────────────────────────────────────────────────────
+
+def _generate_code(data, target):
+    """Generate code snippet for given target language"""
+    method = data.get("method", "GET").upper()
+    url = data.get("url", "https://api.example.com/endpoint")
+    headers = {h["key"]: h["value"] for h in data.get("headers", []) if h.get("key") and h.get("enabled", True)}
+    params = {p["key"]: p["value"] for p in data.get("params", []) if p.get("key") and p.get("enabled", True)}
+    body_type = data.get("body_type", "none")
+    body_content = data.get("body_content", "")
+    auth_type = data.get("auth_type", "none")
+    auth_data = data.get("auth_data", {})
+
+    if auth_type == "basic":
+        headers["Authorization"] = "Basic <base64_encoded_credentials>"
+    elif auth_type == "bearer":
+        headers["Authorization"] = f"Bearer {auth_data.get('token', '<token>')}"
+    elif auth_type == "apikey":
+        loc = auth_data.get("location", "header")
+        kn = auth_data.get("key", "X-API-Key")
+        kv = auth_data.get("value", "<api_key>")
+        if loc == "header": headers[kn] = kv
+        else: params[kn] = kv
+
+    generators = {
+        "curl": _gen_curl, "python": _gen_python, "javascript_fetch": _gen_js_fetch,
+        "javascript_axios": _gen_js_axios, "php": _gen_php, "ruby": _gen_ruby,
+        "go": _gen_go, "java": _gen_java, "csharp": _gen_csharp, "powershell": _gen_powershell
+    }
+    gen = generators.get(target, _gen_curl)
+    return gen(method, url, headers, params, body_type, body_content)
+
+def _gen_curl(method, url, headers, params, body_type, body_content):
+    parts = [f"curl -X {method}"]
+    full_url = url
+    if params:
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        sep = "&" if "?" in url else "?"
+        full_url = url + sep + qs
+    parts.append(f"  '{full_url}'")
+    for k, v in headers.items():
+        parts.append(f"  -H '{k}: {v}'")
+    if body_type in ("json", "graphql") and body_content:
+        parts.append(f"  -H 'Content-Type: application/json'")
+        parts.append(f"  -d '{body_content}'")
+    elif body_type in ("raw", "xml", "soap") and body_content:
+        parts.append(f"  -d '{body_content}'")
+    return " \\\n".join(parts)
+
+def _gen_python(method, url, headers, params, body_type, body_content):
+    lines = ["import requests", "", f"url = \"{url}\""]
+    if params: lines.append(f"params = {json.dumps(params, indent=4)}")
+    if headers: lines.append(f"headers = {json.dumps(headers, indent=4)}")
+    if body_type in ("json", "graphql") and body_content:
+        try: lines.append(f"payload = {json.dumps(json.loads(body_content), indent=4)}")
+        except: lines.append(f"payload = {repr(body_content)}")
+        lines.append(f"response = requests.{method.lower()}(url, json=payload{', headers=headers' if headers else ''}{', params=params' if params else ''})")
+    elif body_type in ("raw", "xml", "soap") and body_content:
+        lines.append(f"data = {repr(body_content)}")
+        lines.append(f"response = requests.{method.lower()}(url, data=data{', headers=headers' if headers else ''}{', params=params' if params else ''})")
+    else:
+        lines.append(f"response = requests.{method.lower()}(url{', headers=headers' if headers else ''}{', params=params' if params else ''})")
+    lines.extend(["", "print(response.status_code)", "print(response.text)"])
+    return "\n".join(lines)
+
+def _gen_js_fetch(method, url, headers, params, body_type, body_content):
+    lines = []
+    if params:
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        sep = "&" if "?" in url else "?"
+        url_expr = f"`{url}{sep}" + "${new URLSearchParams(" + json.dumps(params) + ")}`"
+    else:
+        url_expr = f"'{url}'"
+    opts = [f"  method: '{method}'"]
+    if headers: opts.append(f"  headers: {json.dumps(headers, indent=4).replace(chr(10), chr(10)+'  ')}")
+    if body_type in ("json", "graphql") and body_content:
+        headers.setdefault("Content-Type", "application/json")
+        opts[-1] = f"  headers: {json.dumps(headers, indent=4).replace(chr(10), chr(10)+'  ')}"
+        opts.append(f"  body: JSON.stringify({body_content})")
+    elif body_type in ("raw", "xml", "soap") and body_content:
+        opts.append(f"  body: {repr(body_content)}")
+    lines.append(f"const response = await fetch({url_expr}, {{")
+    lines.append(",\n".join(opts))
+    lines.append("});\n")
+    lines.append("const data = await response.json();")
+    lines.append("console.log(data);")
+    return "\n".join(lines)
+
+def _gen_js_axios(method, url, headers, params, body_type, body_content):
+    lines = ["import axios from 'axios';", ""]
+    config_parts = [f"  method: '{method}'", f"  url: '{url}'"]
+    if params: config_parts.append(f"  params: {json.dumps(params)}")
+    if headers: config_parts.append(f"  headers: {json.dumps(headers)}")
+    if body_type in ("json", "graphql") and body_content:
+        config_parts.append(f"  data: {body_content}")
+    elif body_type in ("raw", "xml", "soap") and body_content:
+        config_parts.append(f"  data: {repr(body_content)}")
+    lines.append(f"const response = await axios({{\n" + ",\n".join(config_parts) + "\n});")
+    lines.append("console.log(response.data);")
+    return "\n".join(lines)
+
+def _gen_php(method, url, headers, params, body_type, body_content):
+    lines = ["<?php", "$ch = curl_init();", ""]
+    full_url = url
+    if params:
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        sep = "&" if "?" in url else "?"
+        full_url = url + sep + qs
+    lines.append(f"curl_setopt($ch, CURLOPT_URL, '{full_url}');")
+    lines.append(f"curl_setopt($ch, CURLOPT_CUSTOMREQUEST, '{method}');")
+    lines.append("curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);")
+    if headers:
+        h_arr = ", ".join(f"'{k}: {v}'" for k, v in headers.items())
+        lines.append(f"curl_setopt($ch, CURLOPT_HTTPHEADER, [{h_arr}]);")
+    if body_type in ("json", "graphql", "raw", "xml", "soap") and body_content:
+        lines.append(f"curl_setopt($ch, CURLOPT_POSTFIELDS, {repr(body_content)});")
+    lines.extend(["", "$response = curl_exec($ch);", "curl_close($ch);", "echo $response;", "?>"])
+    return "\n".join(lines)
+
+def _gen_ruby(method, url, headers, params, body_type, body_content):
+    lines = ["require 'net/http'", "require 'uri'", "require 'json'", ""]
+    full_url = url
+    if params:
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        sep = "&" if "?" in url else "?"
+        full_url = url + sep + qs
+    lines.append(f"uri = URI.parse('{full_url}')")
+    lines.append(f"http = Net::HTTP.new(uri.host, uri.port)")
+    lines.append("http.use_ssl = uri.scheme == 'https'")
+    lines.append(f"request = Net::HTTP::{method.capitalize()}.new(uri.request_uri)")
+    for k, v in headers.items():
+        lines.append(f"request['{k}'] = '{v}'")
+    if body_type in ("json", "graphql") and body_content:
+        lines.append(f"request.body = {repr(body_content)}")
+    elif body_type in ("raw", "xml", "soap") and body_content:
+        lines.append(f"request.body = {repr(body_content)}")
+    lines.extend(["", "response = http.request(request)", "puts response.code", "puts response.body"])
+    return "\n".join(lines)
+
+def _gen_go(method, url, headers, params, body_type, body_content):
+    lines = ['package main', '', 'import (', '\t"fmt"', '\t"io"', '\t"net/http"']
+    has_body = body_type in ("json", "graphql", "raw", "xml", "soap") and body_content
+    if has_body:
+        lines.append('\t"strings"')
+    lines.extend([')', '', 'func main() {'])
+    if has_body:
+        lines.append('\tbody := strings.NewReader(`' + body_content + '`)')
+        lines.append(f'\treq, err := http.NewRequest("{method}", "{url}", body)')
+    else:
+        lines.append(f'\treq, err := http.NewRequest("{method}", "{url}", nil)')
+    lines.append('\tif err != nil { panic(err) }')
+    for k, v in headers.items():
+        lines.append(f'\treq.Header.Set("{k}", "{v}")')
+    if has_body and body_type in ("json", "graphql"):
+        lines.append('\treq.Header.Set("Content-Type", "application/json")')
+    lines.extend(['\tresp, err := http.DefaultClient.Do(req)', '\tif err != nil { panic(err) }',
+                  '\tdefer resp.Body.Close()', '\tb, _ := io.ReadAll(resp.Body)',
+                  '\tfmt.Println(string(b))', '}'])
+    return "\n".join(lines)
+
+def _gen_java(method, url, headers, params, body_type, body_content):
+    lines = ['OkHttpClient client = new OkHttpClient();', '']
+    has_body = body_type in ("json", "graphql", "raw", "xml", "soap") and body_content
+    if has_body:
+        ct = "application/json" if body_type in ("json", "graphql") else "text/plain"
+        lines.append(f'MediaType mediaType = MediaType.parse("{ct}");')
+        escaped = body_content.replace('"', '\\"')
+        lines.append(f'RequestBody body = RequestBody.create(mediaType, "{escaped}");')
+    lines.append('Request request = new Request.Builder()')
+    lines.append(f'    .url("{url}")')
+    if has_body:
+        lines.append(f'    .method("{method}", body)')
+    elif method != "GET":
+        lines.append(f'    .method("{method}", null)')
+    for k, v in headers.items():
+        lines.append(f'    .addHeader("{k}", "{v}")')
+    lines.extend(['    .build();', '', 'Response response = client.newCall(request).execute();',
+                  'System.out.println(response.body().string());'])
+    return "\n".join(lines)
+
+def _gen_csharp(method, url, headers, params, body_type, body_content):
+    lines = ['using var client = new HttpClient();', '']
+    has_body = body_type in ("json", "graphql", "raw", "xml", "soap") and body_content
+    for k, v in headers.items():
+        lines.append(f'client.DefaultRequestHeaders.Add("{k}", "{v}");')
+    if has_body:
+        ct = "application/json" if body_type in ("json", "graphql") else "text/plain"
+        escaped = body_content.replace('"', '""')
+        lines.append(f'var content = new StringContent("{escaped}", System.Text.Encoding.UTF8, "{ct}");')
+        method_map = {"POST": "PostAsync", "PUT": "PutAsync", "PATCH": "PatchAsync"}
+        if method in method_map:
+            lines.append(f'var response = await client.{method_map[method]}("{url}", content);')
+        else:
+            lines.append(f'var request = new HttpRequestMessage(HttpMethod.{method.capitalize()}, "{url}") {{ Content = content }};')
+            lines.append('var response = await client.SendAsync(request);')
+    else:
+        if method == "GET":
+            lines.append(f'var response = await client.GetAsync("{url}");')
+        elif method == "DELETE":
+            lines.append(f'var response = await client.DeleteAsync("{url}");')
+        else:
+            lines.append(f'var request = new HttpRequestMessage(HttpMethod.{method.capitalize()}, "{url}");')
+            lines.append('var response = await client.SendAsync(request);')
+    lines.extend(['var body = await response.Content.ReadAsStringAsync();',
+                  'Console.WriteLine($"Status: {{response.StatusCode}}");', 'Console.WriteLine(body);'])
+    return "\n".join(lines)
+
+def _gen_powershell(method, url, headers, params, body_type, body_content):
+    lines = []
+    if params:
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        sep = "&" if "?" in url else "?"
+        url = url + sep + qs
+    lines.append(f"$uri = '{url}'")
+    if headers:
+        lines.append("$headers = @{")
+        for k, v in headers.items():
+            lines.append(f"    '{k}' = '{v}'")
+        lines.append("}")
+    has_body = body_type in ("json", "graphql", "raw", "xml", "soap") and body_content
+    if has_body:
+        lines.append(f"$body = @'")
+        lines.append(body_content)
+        lines.append("'@")
+    cmd = f"Invoke-RestMethod -Uri $uri -Method {method}"
+    if headers: cmd += " -Headers $headers"
+    if has_body:
+        ct = "application/json" if body_type in ("json", "graphql") else "text/plain"
+        cmd += f" -Body $body -ContentType '{ct}'"
+    lines.extend(["", cmd + " | ConvertTo-Json -Depth 10"])
+    return "\n".join(lines)
+
+@app.route("/api/code/generate", methods=["POST"])
+def generate_code():
+    d = request.json or {}
+    target = d.get("target", "curl")
+    req_data = d.get("request", {})
+    code = _generate_code(req_data, target)
+    return jsonify({"code": code, "target": target})
+
+
+# ─── Backup & Restore ─────────────────────────────────────────────────────────
+
+BACKUP_SCHEMA_VERSION = 2
+
+@app.route("/api/backup", methods=["GET"])
+def export_backup():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        collections = [dict(r) for r in conn.execute("SELECT * FROM collections WHERE user_id=?", (uid,)).fetchall()]
+        col_ids = [c["id"] for c in collections]
+        folders = []
+        requests_data = []
+        if col_ids:
+            placeholders = ",".join("?" * len(col_ids))
+            folders = [dict(r) for r in conn.execute(f"SELECT * FROM folders WHERE collection_id IN ({placeholders})", col_ids).fetchall()]
+            requests_data = [dict(r) for r in conn.execute(f"SELECT * FROM requests WHERE collection_id IN ({placeholders})", col_ids).fetchall()]
+        environments = [dict(r) for r in conn.execute("SELECT * FROM environments WHERE user_id=?", (uid,)).fetchall()]
+        history = [dict(r) for r in conn.execute("SELECT * FROM history WHERE user_id=? ORDER BY timestamp DESC LIMIT 1000", (uid,)).fetchall()]
+        mock_endpoints = [dict(r) for r in conn.execute("SELECT * FROM mock_endpoints WHERE user_id=?", (uid,)).fetchall()]
+        test_suites = [dict(r) for r in conn.execute("SELECT * FROM test_suites WHERE user_id=?", (uid,)).fetchall()]
+        user = conn.execute("SELECT username, email, avatar_color, global_vars FROM users WHERE id=?", (uid,)).fetchone()
+    backup = {
+        "schema_version": BACKUP_SCHEMA_VERSION,
+        "exported_at": datetime.utcnow().isoformat(),
+        "user": dict(user) if user else {},
+        "collections": collections,
+        "folders": folders,
+        "requests": requests_data,
+        "environments": environments,
+        "history": history,
+        "mock_endpoints": mock_endpoints,
+        "test_suites": test_suites
+    }
+    return jsonify(backup)
+
+@app.route("/api/backup/download", methods=["GET"])
+def download_backup():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        collections = [dict(r) for r in conn.execute("SELECT * FROM collections WHERE user_id=?", (uid,)).fetchall()]
+        col_ids = [c["id"] for c in collections]
+        folders, requests_data = [], []
+        if col_ids:
+            ph = ",".join("?" * len(col_ids))
+            folders = [dict(r) for r in conn.execute(f"SELECT * FROM folders WHERE collection_id IN ({ph})", col_ids).fetchall()]
+            requests_data = [dict(r) for r in conn.execute(f"SELECT * FROM requests WHERE collection_id IN ({ph})", col_ids).fetchall()]
+        environments = [dict(r) for r in conn.execute("SELECT * FROM environments WHERE user_id=?", (uid,)).fetchall()]
+        history = [dict(r) for r in conn.execute("SELECT * FROM history WHERE user_id=? ORDER BY timestamp DESC LIMIT 1000", (uid,)).fetchall()]
+        mock_endpoints = [dict(r) for r in conn.execute("SELECT * FROM mock_endpoints WHERE user_id=?", (uid,)).fetchall()]
+        test_suites = [dict(r) for r in conn.execute("SELECT * FROM test_suites WHERE user_id=?", (uid,)).fetchall()]
+        user = conn.execute("SELECT username, email, avatar_color, global_vars FROM users WHERE id=?", (uid,)).fetchone()
+    backup = {
+        "schema_version": BACKUP_SCHEMA_VERSION,
+        "exported_at": datetime.utcnow().isoformat(),
+        "user": dict(user) if user else {},
+        "collections": collections, "folders": folders, "requests": requests_data,
+        "environments": environments, "history": history,
+        "mock_endpoints": mock_endpoints, "test_suites": test_suites
+    }
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"requestlab_backup_{ts}.json"
+    return Response(json.dumps(backup, indent=2), mimetype="application/json",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+@app.route("/api/restore", methods=["POST"])
+def restore_backup():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    mode = d.get("mode", "merge")  # merge or replace
+    backup = d.get("data", {})
+    if not backup: return jsonify({"error": "No backup data provided"}), 400
+    id_map = {}  # old_id -> new_id for collections
+    with get_db() as conn:
+        if mode == "replace":
+            # Delete existing data
+            conn.execute("DELETE FROM shared_collections WHERE team_id IN (SELECT id FROM teams WHERE owner_id=?)", (uid,))
+            conn.execute("DELETE FROM test_results WHERE suite_id IN (SELECT id FROM test_suites WHERE user_id=?)", (uid,))
+            conn.execute("DELETE FROM test_suites WHERE user_id=?", (uid,))
+            conn.execute("DELETE FROM api_docs WHERE user_id=?", (uid,))
+            conn.execute("DELETE FROM mock_endpoints WHERE user_id=?", (uid,))
+            conn.execute("DELETE FROM history WHERE user_id=?", (uid,))
+            conn.execute("DELETE FROM environments WHERE user_id=?", (uid,))
+            # Get collection IDs to delete requests/folders
+            col_ids = [r["id"] for r in conn.execute("SELECT id FROM collections WHERE user_id=?", (uid,)).fetchall()]
+            if col_ids:
+                ph = ",".join("?" * len(col_ids))
+                conn.execute(f"DELETE FROM requests WHERE collection_id IN ({ph})", col_ids)
+                conn.execute(f"DELETE FROM folders WHERE collection_id IN ({ph})", col_ids)
+                conn.execute(f"DELETE FROM shared_collections WHERE collection_id IN ({ph})", col_ids)
+            conn.execute("DELETE FROM collections WHERE user_id=?", (uid,))
+        # Import collections
+        for col in backup.get("collections", []):
+            old_id = col["id"]
+            new_id = conn.execute("INSERT INTO collections (name, user_id, vars) VALUES (?,?,?)",
+                                  (col["name"], uid, col.get("vars", "{}"))).lastrowid
+            id_map[old_id] = new_id
+        # Import folders
+        folder_map = {}
+        for f in backup.get("folders", []):
+            new_col_id = id_map.get(f["collection_id"])
+            if not new_col_id: continue
+            new_fid = conn.execute("INSERT INTO folders (collection_id, parent_folder_id, name) VALUES (?,?,?)",
+                                   (new_col_id, None, f["name"])).lastrowid
+            folder_map[f["id"]] = new_fid
+        # Update folder parent references
+        for f in backup.get("folders", []):
+            if f.get("parent_folder_id") and f["parent_folder_id"] in folder_map:
+                new_fid = folder_map[f["id"]]
+                new_parent = folder_map[f["parent_folder_id"]]
+                conn.execute("UPDATE folders SET parent_folder_id=? WHERE id=?", (new_parent, new_fid))
+        # Import requests
+        for r in backup.get("requests", []):
+            new_col_id = id_map.get(r["collection_id"])
+            if not new_col_id: continue
+            new_folder_id = folder_map.get(r.get("folder_id"))
+            conn.execute("""INSERT INTO requests (collection_id, folder_id, name, method, url, params, headers,
+                         body_type, body_content, auth_type, auth_data, pre_request_script, test_script, script_language)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         (new_col_id, new_folder_id, r["name"], r.get("method","GET"), r.get("url",""),
+                          r.get("params","[]"), r.get("headers","[]"), r.get("body_type","none"),
+                          r.get("body_content",""), r.get("auth_type","none"), r.get("auth_data","{}"),
+                          r.get("pre_request_script",""), r.get("test_script",""), r.get("script_language","javascript")))
+        # Import environments
+        for e in backup.get("environments", []):
+            conn.execute("INSERT INTO environments (name, vars, active, user_id) VALUES (?,?,0,?)",
+                         (e["name"], e.get("vars","{}"), uid))
+        # Import mock endpoints
+        for m in backup.get("mock_endpoints", []):
+            conn.execute("INSERT INTO mock_endpoints (user_id, path, method, response_body, content_type, status_code, delay_ms, enabled) VALUES (?,?,?,?,?,?,?,?)",
+                         (uid, m["path"], m.get("method","GET"), m.get("response_body","{}"),
+                          m.get("content_type","application/json"), m.get("status_code",200),
+                          m.get("delay_ms",0), m.get("enabled",1)))
+        # Import test suites
+        for ts_item in backup.get("test_suites", []):
+            conn.execute("INSERT INTO test_suites (user_id, name, collection_ids, status) VALUES (?,?,?,?)",
+                         (uid, ts_item["name"], ts_item.get("collection_ids","[]"), "idle"))
+        # Import history (limited)
+        for h in backup.get("history", [])[:500]:
+            conn.execute("INSERT INTO history (user_id, method, url, status_code, duration_ms, request_data, response_data) VALUES (?,?,?,?,?,?,?)",
+                         (uid, h.get("method"), h.get("url"), h.get("status_code"), h.get("duration_ms"),
+                          h.get("request_data",""), h.get("response_data","")))
+    return jsonify({"ok": True, "mode": mode,
+                    "imported": {"collections": len(backup.get("collections",[])),
+                                 "environments": len(backup.get("environments",[])),
+                                 "mock_endpoints": len(backup.get("mock_endpoints",[]))}})
+
+@app.route("/api/backup/upload", methods=["POST"])
+def upload_backup():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    f = request.files["file"]
+    try:
+        data = json.loads(f.read().decode("utf-8"))
+    except:
+        return jsonify({"error": "Invalid JSON file"}), 400
+    mode = request.form.get("mode", "merge")
+    # Reuse restore logic
+    request._json = {"data": data, "mode": mode}
+    return restore_backup()
+
+
+# ─── API Monitors ──────────────────────────────────────────────────────────────
+
+def _run_single_monitor(monitor_id, uid):
+    """Execute a single monitor check and record result"""
+    with get_db() as conn:
+        mon = conn.execute("SELECT * FROM monitors WHERE id=? AND user_id=?", (monitor_id, uid)).fetchone()
+        if not mon: return {"error": "Monitor not found"}
+    url = mon["url"]
+    method = mon["method"] or "GET"
+    headers_list = json.loads(mon["headers"]) if mon["headers"] else []
+    headers = {h["key"]: h["value"] for h in headers_list if h.get("key") and h.get("enabled", True)}
+    body_type = mon["body_type"] or "none"
+    body_content = mon["body_content"] or ""
+    req_json = None
+    req_body = None
+    if body_type in ("json", "graphql"):
+        try: req_json = json.loads(body_content) if body_content.strip() else None
+        except: pass
+        headers.setdefault("Content-Type", "application/json")
+    elif body_type in ("raw", "xml", "soap"):
+        req_body = body_content.encode("utf-8")
+    expected_status = mon["expected_status"] or 200
+    expected_body = mon["expected_body"] or ""
+    start = time.time()
+    status = "success"
+    status_code = None
+    resp_body_preview = ""
+    error_msg = ""
+    try:
+        resp = requests.request(method=method, url=url, headers=headers, json=req_json, data=req_body,
+                                timeout=30, allow_redirects=True, verify=True)
+        status_code = resp.status_code
+        resp_body_preview = resp.text[:500]
+        duration_ms = (time.time() - start) * 1000
+        if status_code != expected_status:
+            status = "failure"
+            error_msg = f"Expected status {expected_status}, got {status_code}"
+        elif expected_body and expected_body not in resp.text:
+            status = "failure"
+            error_msg = f"Expected body text not found"
+    except Exception as e:
+        duration_ms = (time.time() - start) * 1000
+        status = "failure"
+        error_msg = str(e)
+    # Record log
+    with get_db() as conn:
+        conn.execute("INSERT INTO monitor_logs (monitor_id,status,status_code,duration_ms,response_body,error) VALUES (?,?,?,?,?,?)",
+                     (monitor_id, status, status_code, round(duration_ms, 2), resp_body_preview, error_msg))
+        # Update monitor stats
+        total_checks = mon["total_checks"] + 1
+        total_failures = mon["total_failures"] + (1 if status == "failure" else 0)
+        uptime_pct = round(((total_checks - total_failures) / total_checks) * 100, 2) if total_checks > 0 else 100.0
+        conn.execute("UPDATE monitors SET last_status=?,last_check=datetime('now'),last_duration_ms=?,total_checks=?,total_failures=?,uptime_pct=? WHERE id=?",
+                     (status, round(duration_ms, 2), total_checks, total_failures, uptime_pct, monitor_id))
+    return {"status": status, "status_code": status_code, "duration_ms": round(duration_ms, 2), "error": error_msg}
+
+@app.route("/api/monitors", methods=["POST"])
+def create_monitor():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    name = d.get("name", "New Monitor").strip()
+    url = d.get("url", "").strip()
+    if not url: return jsonify({"error": "URL required"}), 400
+    with get_db() as conn:
+        mid = conn.execute("""INSERT INTO monitors (user_id,name,url,method,headers,body_type,body_content,
+                           interval_seconds,expected_status,expected_body,enabled)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                          (uid, name, url, d.get("method","GET"), json.dumps(d.get("headers",[])),
+                           d.get("body_type","none"), d.get("body_content",""),
+                           d.get("interval_seconds",300), d.get("expected_status",200),
+                           d.get("expected_body",""), d.get("enabled",1))).lastrowid
+    return jsonify({"id": mid, "name": name, "url": url})
+
+@app.route("/api/monitors", methods=["GET"])
+def list_monitors():
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM monitors WHERE user_id=? ORDER BY created DESC", (uid,)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/monitors/<int:mid>", methods=["PUT"])
+def update_monitor(mid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    d = request.json or {}
+    with get_db() as conn:
+        mon = conn.execute("SELECT user_id FROM monitors WHERE id=?", (mid,)).fetchone()
+        if not mon or mon["user_id"] != uid: return jsonify({"error": "Forbidden"}), 403
+        conn.execute("""UPDATE monitors SET name=?,url=?,method=?,headers=?,body_type=?,body_content=?,
+                     interval_seconds=?,expected_status=?,expected_body=?,enabled=? WHERE id=?""",
+                    (d.get("name",""), d.get("url",""), d.get("method","GET"),
+                     json.dumps(d.get("headers",[])), d.get("body_type","none"), d.get("body_content",""),
+                     d.get("interval_seconds",300), d.get("expected_status",200),
+                     d.get("expected_body",""), d.get("enabled",1), mid))
+    return jsonify({"ok": True})
+
+@app.route("/api/monitors/<int:mid>", methods=["DELETE"])
+def delete_monitor(mid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    with get_db() as conn:
+        mon = conn.execute("SELECT user_id FROM monitors WHERE id=?", (mid,)).fetchone()
+        if not mon or mon["user_id"] != uid: return jsonify({"error": "Forbidden"}), 403
+        conn.execute("DELETE FROM monitors WHERE id=?", (mid,))
+    return jsonify({"ok": True})
+
+@app.route("/api/monitors/<int:mid>/run", methods=["POST"])
+def run_monitor(mid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    result = _run_single_monitor(mid, uid)
+    return jsonify(result)
+
+@app.route("/api/monitors/<int:mid>/logs", methods=["GET"])
+def get_monitor_logs(mid):
+    uid = require_auth()
+    if not uid: return jsonify({"error": "Unauthorized"}), 401
+    limit = request.args.get("limit", 50, type=int)
+    with get_db() as conn:
+        mon = conn.execute("SELECT user_id FROM monitors WHERE id=?", (mid,)).fetchone()
+        if not mon or mon["user_id"] != uid: return jsonify({"error": "Forbidden"}), 403
+        rows = conn.execute("SELECT * FROM monitor_logs WHERE monitor_id=? ORDER BY checked_at DESC LIMIT ?", (mid, limit)).fetchall()
+    return jsonify([dict(r) for r in rows])
 
 
 # ─── Frontend ─────────────────────────────────────────────────────────────────
@@ -1801,7 +3224,8 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 #topbar{grid-column:1/-1;display:flex;align-items:center;background:var(--bg1);border-bottom:1px solid var(--border);z-index:20;padding:0}
 #sidebar{background:var(--bg1);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
 #main{display:flex;flex-direction:column;overflow:hidden;background:var(--bg0);position:relative}
-#view-builder,#view-environments,#view-mocks,#view-runner{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+#view-builder{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+#view-environments,#view-mocks,#view-runner,#view-testsuites,#view-docs,#view-settings,#view-monitor{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
 /* ── Topbar ── */
 .logo-area{display:flex;align-items:center;gap:10px;padding:0 18px;width:260px;border-right:1px solid var(--border);height:100%;flex-shrink:0}
 .logo-mark{width:26px;height:26px;background:var(--acc);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#000;box-shadow:0 0 12px var(--acc-glow);flex-shrink:0}
@@ -1826,6 +3250,9 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .sidebar-search{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:6px 10px;font-size:11px;color:var(--txt);font-family:var(--mono);outline:none;transition:border-color .15s}
 .sidebar-search:focus{border-color:var(--acc)}
 .sidebar-search::placeholder{color:var(--txt3)}
+.script-editor{width:100%;min-height:280px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;font-size:12.5px;line-height:1.6;color:var(--txt);font-family:var(--mono);resize:vertical;outline:none;tab-size:4;transition:border-color .15s}
+.script-editor:focus{border-color:var(--acc)}
+.script-editor::placeholder{color:var(--txt3);font-style:italic}
 .icon-btn{background:none;border:1px solid var(--border);color:var(--txt3);cursor:pointer;padding:5px 8px;border-radius:var(--radius);display:flex;align-items:center;font-size:12px;transition:all .15s;font-family:var(--mono)}
 .icon-btn:hover{color:var(--txt);background:var(--bg3);border-color:var(--border2)}
 .icon-btn.accent{border-color:var(--acc-dim);color:var(--acc)}
@@ -2707,10 +4134,14 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
       <button class="sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar (Ctrl+\\)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg></button>
     </div>
     <div class="top-nav">
-      <button class="top-tab active" onclick="switchView('builder')">Request Builder</button>
-      <button class="top-tab" onclick="switchView('environments')">Environments</button>
-      <button class="top-tab" onclick="switchView('mocks')">Mock Server</button>
+      <button class="top-tab active" onclick="switchView('builder')">Builder</button>
+      <button class="top-tab" onclick="switchView('environments')">Envs</button>
+      <button class="top-tab" onclick="switchView('mocks')">Mocks</button>
       <button class="top-tab" onclick="switchView('runner')">Runner</button>
+      <button class="top-tab" onclick="switchView('testsuites')">Test Suites</button>
+      <button class="top-tab" onclick="switchView('docs')">Docs</button>
+      <button class="top-tab" onclick="switchView('monitor')">Monitor</button>
+      <button class="top-tab" onclick="switchView('settings')">Settings</button>
     </div>
     <div class="top-right">
       <button class="icon-btn" onclick="toggleTheme()" title="Toggle Theme" id="theme-btn" style="border:none;font-size:16px;">☀️</button>
@@ -2739,6 +4170,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
     <div class="sidebar-tabs">
       <button class="s-tab active" id="st-collections" onclick="sidebarTab('collections')">Collections</button>
       <button class="s-tab" id="st-history" onclick="sidebarTab('history')">History</button>
+      <button class="s-tab" id="st-teams" onclick="sidebarTab('teams')">Teams</button>
     </div>
     <div id="sp-collections" class="sidebar-inner">
       <div class="sidebar-toolbar">
@@ -2754,6 +4186,13 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
         <button class="icon-btn" title="Clear history" onclick="clearHistory()">🗑</button>
       </div>
       <div class="sidebar-scroll" id="history-list"></div>
+    </div>
+    <div id="sp-teams" class="sidebar-inner" style="display:none">
+      <div class="sidebar-toolbar">
+        <input class="sidebar-search" id="team-search" placeholder="Search teams..." style="flex:1">
+        <button class="icon-btn accent" title="Create team" onclick="showCreateTeamModal()">+</button>
+      </div>
+      <div class="sidebar-scroll" id="teams-list"></div>
     </div>
   </aside>
 
@@ -2792,6 +4231,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
           </div>
           <div class="btn-group">
             <button class="save-btn" onclick="handleSave()">Save</button>
+            <button class="icon-btn" onclick="openCodeGen()" title="Generate Code" style="padding:6px 10px;font-size:11px">&lt;/&gt;</button>
             <button class="send-btn" id="send-btn" onclick="sendRequest()">Send</button>
             <button class="cancel-btn" id="cancel-btn" onclick="cancelRequest()" style="display:none">✕ Cancel</button>
           </div>
@@ -2805,6 +4245,9 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
           <div class="tab" onclick="reqTab('headers')" id="rt-headers">Headers <span class="tab-badge" id="tc-headers">0</span></div>
           <div class="tab" onclick="reqTab('body')" id="rt-body">Body</div>
           <div class="tab" onclick="reqTab('auth')" id="rt-auth">Auth</div>
+          <div class="tab" onclick="reqTab('cookies')" id="rt-cookies">Cookies <span class="tab-badge" id="tc-cookies">0</span></div>
+          <div class="tab" onclick="reqTab('preproc')" id="rt-preproc">Pre-Processor</div>
+          <div class="tab" onclick="reqTab('postproc')" id="rt-postproc">Post-Processor</div>
         </div>
 
         <div style="flex:1;overflow-y:auto;background:var(--bg0)">
@@ -2871,6 +4314,30 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
               <option value="apikey">API Key</option>
             </select>
             <div id="auth-fields"></div>
+          </div>
+          <!-- Cookies -->
+          <div class="tab-content tab-pane" id="pane-cookies">
+            <div class="kv-wrap"><table class="kv-table">
+              <thead><tr><th style="width:28px"></th><th>Key</th><th>Value</th><th>Description</th><th style="width:36px"></th></tr></thead>
+              <tbody id="cookies-body"></tbody>
+            </table></div>
+            <button class="add-row-btn" onclick="addKVRow('cookies')">+ Add Cookie</button>
+          </div>
+          <!-- Pre-Processor -->
+          <div class="tab-content tab-pane" id="pane-preproc">
+            <div style="padding:8px 10px;font-size:11px;color:var(--txt3)">Runs before the request. Modify headers, params, or set environment variables.</div>
+            <textarea id="preproc-editor" class="script-editor" placeholder="# Pre-Processor (Python)
+# Available: pm.environment, pm.globals, pm.request
+# Example:
+pm.environment.set('timestamp', str(int(__import__('time').time())))" spellcheck="false" oninput="markTabDirty()"></textarea>
+          </div>
+          <!-- Post-Processor -->
+          <div class="tab-content tab-pane" id="pane-postproc">
+            <div style="padding:8px 10px;font-size:11px;color:var(--txt3)">Runs after the response. Validate, transform, or extract data from the response.</div>
+            <textarea id="postproc-editor" class="script-editor" placeholder="# Post-Processor (Python)
+# Available: pm.environment, pm.globals, pm.response, pm.expect, pm.test
+# Example:
+pm.test('Status is 200', lambda: pm.response.get('status_code') == 200)" spellcheck="false" oninput="markTabDirty()"></textarea>
           </div>
         </div>
       </div>
@@ -2999,6 +4466,102 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
         </div>
       </div>
     </div>
+
+    <!-- Test Suites View -->
+    <div id="view-testsuites" style="display:none;flex-direction:column;overflow:hidden;flex:1;min-height:0">
+      <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg1)">
+        <div>
+          <h2 style="font-size:14px;font-weight:700">Test Suites</h2>
+          <p style="font-size:11px;color:var(--txt3);margin-top:2px">Group collections and run automated tests</p>
+        </div>
+        <button class="icon-btn accent" onclick="showCreateSuiteModal()" style="padding:6px 14px;font-size:11px">+ New Suite</button>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:16px 20px">
+        <div id="suites-list" style="display:flex;flex-direction:column;gap:10px"></div>
+        <div id="suite-results-panel" style="display:none;margin-top:20px">
+          <h3 style="font-size:13px;font-weight:700;margin-bottom:10px">Run History</h3>
+          <div id="suite-results-list" style="display:flex;flex-direction:column;gap:8px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- API Docs View -->
+    <div id="view-docs" style="display:none;flex-direction:column;overflow:hidden;flex:1;min-height:0">
+      <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg1)">
+        <div>
+          <h2 style="font-size:14px;font-weight:700">API Documentation</h2>
+          <p style="font-size:11px;color:var(--txt3);margin-top:2px">Generate and export API docs from collections</p>
+        </div>
+        <div style="display:flex;gap:6px">
+          <select id="docs-collection-select" class="env-select" style="min-width:160px" onchange="loadDocsForCollection()">
+            <option value="">Select collection...</option>
+          </select>
+          <button class="icon-btn" onclick="exportDocs('openapi')" title="Export OpenAPI">JSON</button>
+          <button class="icon-btn" onclick="exportDocs('markdown')" title="Export Markdown">MD</button>
+          <button class="icon-btn" onclick="exportDocs('html')" title="Export HTML">HTML</button>
+        </div>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:16px 20px" id="docs-content-area">
+        <p style="color:var(--txt3);font-size:12px">Select a collection to generate API documentation.</p>
+      </div>
+    </div>
+
+    <!-- Settings View (CI/CD + Backup) -->
+    <div id="view-settings" style="display:none;flex-direction:column;overflow:hidden;flex:1;min-height:0">
+      <div style="padding:14px 20px;border-bottom:1px solid var(--border);background:var(--bg1)">
+        <h2 style="font-size:14px;font-weight:700">Settings</h2>
+        <p style="font-size:11px;color:var(--txt3);margin-top:2px">CI/CD integration, backup &amp; restore</p>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:16px 20px">
+        <div style="margin-bottom:24px">
+          <h3 style="font-size:13px;font-weight:700;margin-bottom:12px">CI/CD Integration</h3>
+          <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+            <input id="ci-token-name" class="sidebar-search" placeholder="Token name..." style="max-width:200px">
+            <button class="icon-btn accent" onclick="createCIToken()" style="padding:6px 14px;font-size:11px">Generate Token</button>
+          </div>
+          <div id="ci-tokens-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px"></div>
+          <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px;font-size:12px">
+            <h4 style="font-size:12px;font-weight:700;margin-bottom:8px">CI/CD Usage</h4>
+            <p style="color:var(--txt3);font-size:11px;margin-bottom:8px">Run test suites from your CI pipeline:</p>
+            <pre style="background:var(--bg0);padding:10px;border-radius:var(--radius);font-size:11px;overflow-x:auto;color:var(--txt2);font-family:var(--mono)">curl -X POST http://localhost:5000/api/ci/run \
+  -H "X-CI-Token: YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"suite_id": 1, "format": "junit"}'</pre>
+            <p style="color:var(--txt3);font-size:11px;margin-top:8px">Get results as JUnit XML for CI integration or JSON for custom processing.</p>
+          </div>
+        </div>
+        <div>
+          <h3 style="font-size:13px;font-weight:700;margin-bottom:12px">Backup &amp; Restore</h3>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="icon-btn accent" onclick="downloadBackup()" style="padding:8px 18px;font-size:11px">Export Backup</button>
+            <label class="icon-btn" style="padding:8px 18px;font-size:11px;cursor:pointer">
+              Import Backup
+              <input type="file" accept=".json" onchange="uploadBackup(this.files[0])" style="display:none">
+            </label>
+            <select id="restore-mode" class="env-select" style="min-width:100px">
+              <option value="merge">Merge</option>
+              <option value="replace">Replace All</option>
+            </select>
+          </div>
+          <div id="backup-status" style="margin-top:10px;font-size:11px;color:var(--txt3)"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Monitor View -->
+    <div id="view-monitor" style="display:none;flex-direction:column;overflow:hidden;flex:1;min-height:0">
+      <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg1)">
+        <div>
+          <h2 style="font-size:14px;font-weight:700">API Monitor</h2>
+          <p style="font-size:11px;color:var(--txt3);margin-top:2px">Track uptime and performance of your APIs</p>
+        </div>
+        <button class="icon-btn accent" onclick="showCreateMonitorModal()" style="padding:6px 14px;font-size:11px">+ New Monitor</button>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:16px 20px">
+        <div id="monitors-list" style="display:flex;flex-direction:column;gap:10px"></div>
+      </div>
+    </div>
+
   </main>
 </div>
 
@@ -3174,6 +4737,105 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
   </div>
 </div>
 
+<!-- ══ Create Team Modal ══ -->
+<div class="modal-overlay" id="create-team-modal">
+  <div class="modal">
+    <div class="modal-header"><h3>Create Team</h3><button class="modal-close" onclick="closeModal('create-team-modal')">&times;</button></div>
+    <div style="padding:16px">
+      <input id="new-team-name" class="sidebar-search" placeholder="Team name..." style="width:100%;margin-bottom:12px">
+      <div class="modal-actions"><button class="btn-secondary" onclick="closeModal('create-team-modal')">Cancel</button><button class="btn-primary" onclick="createTeam()">Create</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Team Details Modal ══ -->
+<div class="modal-overlay" id="team-details-modal">
+  <div class="modal" style="width:580px">
+    <div class="modal-header"><h3 id="team-details-name">Team</h3><button class="modal-close" onclick="closeModal('team-details-modal')">&times;</button></div>
+    <div style="padding:16px">
+      <div style="margin-bottom:16px">
+        <h4 style="font-size:12px;font-weight:700;margin-bottom:8px">Members</h4>
+        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+          <input id="invite-email" class="sidebar-search" placeholder="Enter email address..." style="flex:1;min-width:0;padding:9px 12px;font-size:12.5px">
+          <select id="invite-role" class="env-select" style="width:95px;flex-shrink:0;padding:9px 10px;font-size:12.5px"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option></select>
+          <button class="icon-btn accent" style="padding:9px 14px;font-size:12.5px;white-space:nowrap;flex-shrink:0" onclick="inviteMember()">Invite</button>
+        </div>
+        <div id="team-members-list" style="max-height:200px;overflow-y:auto"></div>
+      </div>
+      <div>
+        <h4 style="font-size:12px;font-weight:700;margin-bottom:8px">Shared Collections</h4>
+        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+          <select id="share-collection-select" class="env-select" style="flex:1;padding:9px 10px;font-size:12.5px"><option value="">Select collection...</option></select>
+          <button class="icon-btn accent" style="padding:9px 14px;font-size:12.5px" onclick="shareCollection()">Share</button>
+        </div>
+        <div id="team-shared-collections" style="max-height:150px;overflow-y:auto"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Create Test Suite Modal ══ -->
+<div class="modal-overlay" id="create-suite-modal">
+  <div class="modal" style="width:480px">
+    <div class="modal-header"><h3>New Test Suite</h3><button class="modal-close" onclick="closeModal('create-suite-modal')">&times;</button></div>
+    <div style="padding:16px">
+      <input id="new-suite-name" class="sidebar-search" placeholder="Suite name..." style="width:100%;margin-bottom:12px">
+      <h4 style="font-size:12px;font-weight:700;margin-bottom:8px">Select Collections</h4>
+      <div id="suite-collections-picker" style="max-height:200px;overflow-y:auto;margin-bottom:12px"></div>
+      <div class="modal-actions"><button class="btn-secondary" onclick="closeModal('create-suite-modal')">Cancel</button><button class="btn-primary" onclick="createTestSuite()">Create Suite</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Code Generation Modal ══ -->
+<div class="modal-overlay" id="code-gen-modal">
+  <div class="modal" style="width:600px">
+    <div class="modal-header"><h3>Code Generator</h3><button class="modal-close" onclick="closeModal('code-gen-modal')">&times;</button></div>
+    <div style="padding:16px">
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <select id="code-target" class="env-select" style="min-width:180px" onchange="generateCode()">
+          <option value="curl">cURL</option><option value="python">Python (requests)</option>
+          <option value="javascript_fetch">JavaScript (fetch)</option><option value="javascript_axios">JavaScript (axios)</option>
+          <option value="php">PHP</option><option value="ruby">Ruby</option>
+          <option value="go">Go</option><option value="java">Java (OkHttp)</option>
+          <option value="csharp">C# (HttpClient)</option><option value="powershell">PowerShell</option>
+        </select>
+        <button class="icon-btn" onclick="copyGeneratedCode()" style="padding:6px 14px;font-size:11px">Copy</button>
+      </div>
+      <pre id="code-output" style="background:var(--bg0);padding:14px;border-radius:var(--radius-lg);font-size:12px;font-family:var(--mono);max-height:400px;overflow:auto;white-space:pre-wrap;color:var(--txt2);border:1px solid var(--border)"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Create Monitor Modal ══ -->
+<div class="modal-overlay" id="create-monitor-modal">
+  <div class="modal" style="width:580px">
+    <div class="modal-header"><h3 id="monitor-modal-title">New Monitor</h3><button class="modal-close" onclick="closeModal('create-monitor-modal')">&times;</button></div>
+    <div style="padding:16px;display:flex;flex-direction:column;gap:10px">
+      <input id="mon-name" class="sidebar-search" placeholder="Monitor name..." style="width:100%;padding:9px 12px;font-size:12.5px">
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="mon-method" class="env-select" style="width:100px;flex-shrink:0;padding:9px 10px;font-size:12.5px"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option><option>PATCH</option></select>
+        <input id="mon-url" class="sidebar-search" placeholder="https://api.example.com/health" style="flex:1;min-width:0;padding:9px 12px;font-size:12.5px">
+      </div>
+      <div style="display:flex;gap:8px">
+        <div style="flex:1"><label style="font-size:11px;color:var(--txt3)">Expected Status</label><input id="mon-expected-status" class="sidebar-search" value="200" style="width:100%"></div>
+        <div style="flex:1"><label style="font-size:11px;color:var(--txt3)">Interval (sec)</label><input id="mon-interval" class="sidebar-search" value="300" style="width:100%"></div>
+      </div>
+      <div><label style="font-size:11px;color:var(--txt3)">Expected Body Contains (optional)</label><input id="mon-expected-body" class="sidebar-search" placeholder="ok" style="width:100%"></div>
+      <input type="hidden" id="mon-edit-id" value="">
+      <div class="modal-actions"><button class="btn-secondary" onclick="closeModal('create-monitor-modal')">Cancel</button><button class="btn-primary" onclick="saveMonitor()">Save Monitor</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Monitor Logs Modal ══ -->
+<div class="modal-overlay" id="monitor-logs-modal">
+  <div class="modal" style="width:600px">
+    <div class="modal-header"><h3 id="monitor-logs-title">Monitor Logs</h3><button class="modal-close" onclick="closeModal('monitor-logs-modal')">&times;</button></div>
+    <div style="padding:16px;max-height:400px;overflow-y:auto" id="monitor-logs-content"></div>
+  </div>
+</div>
+
 <div id="global-var-tooltip" class="var-tooltip"></div>
 
 <script>
@@ -3198,9 +4860,10 @@ let tabCounter = 0;
 function makeTabState(o={}) {
   return Object.assign({
     id:++tabCounter, name:'Untitled Request', savedReqId:null, dirty:false,
-    protocol:'http', method:'GET', url:'', params:[], headers:[],
+    protocol:'http', method:'GET', url:'', params:[], headers:[], cookies:[],
     bodyType:'none', bodyContent:'', bodyKV:[],
     authType:'none', authData:{}, response:null,
+    preProcessor:'', postProcessor:'',
     isRequesting: false, abortController: null,
   }, o);
 }
@@ -3215,6 +4878,7 @@ function snapshotTab(){
   t.url=document.getElementById('url-input').value;
   t.params=getKVRows('params-body');
   t.headers=getKVRows('headers-body');
+  t.cookies=getKVRows('cookies-body');
   t.bodyType=S.bodyType;
   t.bodyContent=['json','raw'].includes(S.bodyType)?document.getElementById('body-editor').value:'';
   if(S.bodyType==='graphql') t.bodyContent=JSON.stringify({query:document.getElementById('graphql-query').value,variables:document.getElementById('graphql-vars').value});
@@ -3222,6 +4886,8 @@ function snapshotTab(){
   t.authType=document.getElementById('auth-type').value;
   t.authData=getAuthData();
   t.name=document.getElementById('req-name-text').textContent;
+  t.preProcessor=document.getElementById('preproc-editor')?document.getElementById('preproc-editor').value:'';
+  t.postProcessor=document.getElementById('postproc-editor')?document.getElementById('postproc-editor').value:'';
 }
 
 function restoreTab(t){
@@ -3237,6 +4903,8 @@ function restoreTab(t){
   document.getElementById('headers-body').innerHTML='';
   if(t.headers.length) t.headers.forEach(h=>addKVRow('headers',h.key,h.value,h.desc||'',h.enabled));
   else addKVRow('headers');
+  const cookiesBody=document.getElementById('cookies-body');
+  if(cookiesBody){cookiesBody.innerHTML='';if(t.cookies&&t.cookies.length) t.cookies.forEach(c=>addKVRow('cookies',c.key,c.value,c.desc||'',c.enabled));else addKVRow('cookies');}
   S.bodyType=t.bodyType; setBodyType(t.bodyType);
   if(t.bodyType==='graphql'){
     try{ const j=JSON.parse(t.bodyContent||'{}'); document.getElementById('graphql-query').value=j.query||''; document.getElementById('graphql-vars').value=j.variables||''; }
@@ -3255,6 +4923,8 @@ function restoreTab(t){
   else if(t.authType==='oauth2'){ setIV('auth-token',t.authData.token||''); setIV('auth-prefix',t.authData.prefix||'Bearer'); }
   else if(t.authType==='awsv4'){ setIV('auth-access-key',t.authData.access_key||''); setIV('auth-secret-key',t.authData.secret_key||''); setIV('auth-region',t.authData.region||'us-east-1'); setIV('auth-service',t.authData.service||'execute-api'); setIV('auth-session-token',t.authData.session_token||''); }
   else if(t.authType==='apikey'){ setIV('auth-key',t.authData.key||''); setIV('auth-value',t.authData.value||''); setIV('auth-location',t.authData.location||'header'); }
+  setIV('preproc-editor',t.preProcessor||'');
+  setIV('postproc-editor',t.postProcessor||'');
   if(t.response){ S.response=t.response; renderResponse(t.response); }
   else { S.response=null; document.getElementById('resp-empty').style.display='flex'; document.getElementById('resp-body-content').style.display='none'; document.getElementById('resp-status-wrap').style.display='none'; document.getElementById('resp-view-bar').style.display='none'; document.getElementById('resp-body-tree').style.display='none'; document.getElementById('resp-body-raw').style.display='none'; document.getElementById('resp-body-preview').style.display='none'; }
   updateTabBadge('params'); updateTabBadge('headers');
@@ -3600,59 +5270,56 @@ function toast(msg,type='info',dur=2800){
 //  VIEW / SIDEBAR SWITCHING
 // ══════════════════════════════════════════════════════════
 function switchView(v){
-  const views = ['builder','environments','mocks','runner'];
+  const views = ['builder','environments','mocks','runner','testsuites','docs','monitor','settings'];
   document.querySelectorAll('.top-tab').forEach((t,i)=>t.classList.toggle('active',views[i]===v));
-  const builderView = document.getElementById('view-builder');
-  const envView = document.getElementById('view-environments');
-  const mocksView = document.getElementById('view-mocks');
-  const runnerView = document.getElementById('view-runner');
-  
-  // Hide all views
-  // Show selected view
+  // Hide all sub-views inside view-builder (never hide view-builder itself)
+  const subViews = ['view-environments','view-mocks','view-runner','view-testsuites','view-docs','view-settings','view-monitor'];
+  subViews.forEach(id => { const el = document.getElementById(id); if(el) el.style.display = 'none'; });
+  const reqTabsBar = document.getElementById('req-tabs-bar');
+  const reqPanel = document.getElementById('request-panel');
+  if(reqTabsBar) reqTabsBar.style.display = 'none';
+  if(reqPanel) reqPanel.style.display = 'none';
   if(v==='builder') {
-    envView.style.display = 'none';
-    mocksView.style.display = 'none';
-    runnerView.style.display = 'none';
-    document.getElementById('req-tabs-bar').style.display = 'flex';
-    document.getElementById('request-panel').style.display = 'flex';
+    if(reqTabsBar) reqTabsBar.style.display = 'flex';
+    if(reqPanel) reqPanel.style.display = 'flex';
   } else if(v==='environments') {
-    envView.style.display = 'flex';
-    mocksView.style.display = 'none';
-    runnerView.style.display = 'none';
-    envView.querySelector('div:first-child').style.display = 'flex';
+    document.getElementById('view-environments').style.display = 'flex';
     document.getElementById('envs-panel').style.display = 'block';
-    document.getElementById('req-tabs-bar').style.display = 'none';
-    document.getElementById('request-panel').style.display = 'none';
-    loadEnvironments(); 
-    setTimeout(() => renderEnvironmentsView(), 100);
+    loadEnvironments(); setTimeout(() => renderEnvironmentsView(), 100);
   } else if(v==='mocks') {
-    mocksView.style.display = 'flex';
-    envView.style.display = 'none';
-    runnerView.style.display = 'none';
-    
-    document.getElementById('req-tabs-bar').style.display = 'none';
-    document.getElementById('request-panel').style.display = 'none';
+    document.getElementById('view-mocks').style.display = 'flex';
     loadMocks();
   } else if(v==='runner') {
-    runnerView.style.display = 'flex';
-    envView.style.display = 'none';
-    mocksView.style.display = 'none';
-    document.getElementById('req-tabs-bar').style.display = 'none';
-    document.getElementById('request-panel').style.display = 'none';
+    document.getElementById('view-runner').style.display = 'flex';
     loadRunnerCollections();
+  } else if(v==='testsuites') {
+    document.getElementById('view-testsuites').style.display = 'flex';
+    loadTestSuites();
+  } else if(v==='docs') {
+    document.getElementById('view-docs').style.display = 'flex';
+    loadDocsCollections();
+  } else if(v==='settings') {
+    document.getElementById('view-settings').style.display = 'flex';
+    loadCITokens();
+  } else if(v==='monitor') {
+    document.getElementById('view-monitor').style.display = 'flex';
+    loadMonitors();
   }
 }
 
 function sidebarTab(t){
   document.getElementById('st-collections').classList.toggle('active',t==='collections');
   document.getElementById('st-history').classList.toggle('active',t==='history');
+  document.getElementById('st-teams').classList.toggle('active',t==='teams');
   document.getElementById('sp-collections').style.display=t==='collections'?'flex':'none';
   document.getElementById('sp-history').style.display=t==='history'?'flex':'none';
+  document.getElementById('sp-teams').style.display=t==='teams'?'flex':'none';
   if(t==='history') loadHistory();
+  if(t==='teams') loadTeams();
 }
 
 function reqTab(name){
-  ['params','headers','body','auth'].forEach(t=>{
+  ['params','headers','body','auth','cookies','preproc','postproc'].forEach(t=>{
     document.getElementById('pane-'+t).classList.toggle('active',t===name);
     const e=document.getElementById('rt-'+t); if(e) e.classList.toggle('active',t===name);
   });
@@ -3715,7 +5382,7 @@ function addKVRow(type,key='',value='',desc='',enabled=true){
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
 
 function updateTabBadge(type){
-  const map={params:'tc-params',headers:'tc-headers'};
+  const map={params:'tc-params',headers:'tc-headers',cookies:'tc-cookies'};
   const bid=map[type]; if(!bid) return;
   const n=[...document.querySelectorAll('#'+type+'-body tr')].filter(r=>{
     const cb=r.querySelector('input[type=checkbox]');
@@ -4115,11 +5782,14 @@ async function sendRequest(){
   const authData=substituteAuthData(authType,getAuthData());
   const params=substituteKVList(getKVRows('params-body'));
   const headers=substituteKVList(getKVRows('headers-body'));
+  const cookies=substituteKVList(getKVRows('cookies-body'));
+  const preProcessor=document.getElementById('preproc-editor')?document.getElementById('preproc-editor').value:'';
+  const postProcessor=document.getElementById('postproc-editor')?document.getElementById('postproc-editor').value:'';
   try{
     let result;
     if(bodyType==='form'){
       const formRows=getFormRows();
-      const payload={method:document.getElementById('method-select').value,url,params,headers,body_type:'form',body_content:'{}',auth_type:authType,auth_data:authData};
+      const payload={method:document.getElementById('method-select').value,url,params,headers,cookies,body_type:'form',body_content:'{}',auth_type:authType,auth_data:authData,pre_processor:preProcessor,post_processor:postProcessor};
       const fd = new FormData();
       const textFields = {};
       formRows.forEach(r => {
@@ -4144,7 +5814,7 @@ async function sendRequest(){
         bodyContent=JSON.stringify({query:substituteVars(q),variables:varsObj});
       }
       else if(bodyType==='urlencoded'){ const kv=getFormRows(); const obj={}; kv.forEach(r=>{obj[substituteVars(r.key)]=substituteVars(r.value);}); bodyContent=JSON.stringify(obj); }
-      const payload={method:document.getElementById('method-select').value,url,params,headers,body_type:bodyType,body_content:bodyContent,auth_type:authType,auth_data:authData,protocol:t.protocol};
+      const payload={method:document.getElementById('method-select').value,url,params,headers,cookies,body_type:bodyType,body_content:bodyContent,auth_type:authType,auth_data:authData,protocol:t.protocol,pre_processor:preProcessor,post_processor:postProcessor};
       const res=await fetch('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:t.abortController.signal});
       result=await res.json();
     }
@@ -4845,8 +6515,9 @@ async function loadRequestInTab(id){
   const t=currentTab();
   const reuse=t&&!t.dirty&&!t.savedReqId&&!t.url;
   const newState=makeTabState({savedReqId:id,name:r.name,method:r.method,url:r.url,
-    params:r.params||[],headers:r.headers||[],bodyType:r.body_type||'none',bodyContent:r.body_content||'',
-    authType:r.auth_type||'none',authData:r.auth_data||{},dirty:false});
+    params:r.params||[],headers:r.headers||[],cookies:r.cookies||[],bodyType:r.body_type||'none',bodyContent:r.body_content||'',
+    authType:r.auth_type||'none',authData:r.auth_data||{},dirty:false,
+    preProcessor:r.pre_processor||'',postProcessor:r.post_processor||''});
   if(reuse){ tabs[activeTabIdx]=newState; restoreTab(newState); }
   else { if(activeTabIdx>=0) snapshotTab(); tabs.push(newState); activeTabIdx=tabs.length-1; restoreTab(newState); }
   renderTabBar();
@@ -4949,8 +6620,11 @@ async function performSave(name,collId,folderId){
     name:name, method:document.getElementById('method-select').value,
     url:document.getElementById('url-input').value,
     params:getKVRows('params-body'), headers:getKVRows('headers-body'),
+    cookies:getKVRows('cookies-body'),
     body_type:bodyType, body_content:bodyContent,
     auth_type:document.getElementById('auth-type').value, auth_data:getAuthData(),
+    pre_processor:document.getElementById('preproc-editor')?document.getElementById('preproc-editor').value:'',
+    post_processor:document.getElementById('postproc-editor')?document.getElementById('postproc-editor').value:'',
   };
   if(collId!==null&&collId!==undefined) payload.collection_id=collId;
   if(folderId!==null&&folderId!==undefined) payload.folder_id=folderId;
@@ -5472,6 +7146,561 @@ function setupResizeHandle(){
 }
 
 document.querySelectorAll('.modal-overlay').forEach(o=>o.addEventListener('click',e=>{if(e.target===o)o.classList.remove('open');}));
+
+// ══════════════════════════════════════════════════════════
+//  TEAM COLLABORATION
+// ══════════════════════════════════════════════════════════
+let _currentTeamId = null;
+
+async function loadTeams() {
+  try {
+    const res = await fetch('/api/teams');
+    const teams = await res.json();
+    const list = document.getElementById('teams-list');
+    if(!teams.length) { list.innerHTML = '<p style="color:var(--txt3);font-size:11px;padding:8px">No teams yet. Create one!</p>'; return; }
+    list.innerHTML = teams.map(t => `
+      <div class="coll-group" style="cursor:pointer" onclick="openTeamDetails(${t.id})">
+        <div class="coll-header">
+          <span class="coll-icon">\u{1F465}</span>
+          <span class="coll-name">${esc(t.name)}</span>
+          <span class="coll-count">${t.member_count}</span>
+          <span style="font-size:10px;color:var(--txt3);background:var(--bg3);padding:1px 6px;border-radius:10px">${t.role}</span>
+        </div>
+      </div>
+    `).join('');
+  } catch(e) { console.error(e); }
+}
+
+function showCreateTeamModal() { document.getElementById('new-team-name').value=''; openModal('create-team-modal'); }
+
+async function createTeam() {
+  const name = document.getElementById('new-team-name').value.trim();
+  if(!name) { toast('Enter a team name','error'); return; }
+  try {
+    const res = await fetch('/api/teams', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})});
+    if(!res.ok) { const e = await res.json(); toast(e.error||'Failed','error'); return; }
+    closeModal('create-team-modal');
+    toast('Team created!');
+    loadTeams();
+  } catch(e) { toast('Error creating team','error'); }
+}
+
+async function openTeamDetails(tid) {
+  _currentTeamId = tid;
+  try {
+    const res = await fetch(`/api/teams/${tid}`);
+    const data = await res.json();
+    document.getElementById('team-details-name').textContent = data.team.name;
+    const ml = document.getElementById('team-members-list');
+    ml.innerHTML = data.members.map(m => `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+        <div style="width:28px;height:28px;border-radius:50%;background:${m.avatar_color||'#00d4ff'};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#000">${(m.username||'?')[0].toUpperCase()}</div>
+        <span style="flex:1;font-size:12px">${esc(m.username)}</span>
+        <span style="font-size:10px;color:var(--txt3)">${m.role}</span>
+        ${data.team.owner_id !== m.id ? `<button class="icon-btn" style="font-size:10px;padding:2px 6px" onclick="removeMember(${tid},${m.id})">&times;</button>` : ''}
+      </div>
+    `).join('');
+    const sc = document.getElementById('team-shared-collections');
+    sc.innerHTML = data.shared_collections.length ? data.shared_collections.map(c => `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+        <span style="flex:1;font-size:12px">${esc(c.name)}</span>
+        <span style="font-size:10px;color:var(--txt3)">by ${esc(c.shared_by_name||'unknown')}</span>
+        <button class="icon-btn" style="font-size:10px;padding:2px 6px" onclick="unshareCollection(${tid},${c.collection_id})">&times;</button>
+      </div>
+    `).join('') : '<p style="color:var(--txt3);font-size:11px">No shared collections</p>';
+    // Load collections for sharing
+    const colRes = await fetch('/api/collections');
+    const cols = await colRes.json();
+    const sel = document.getElementById('share-collection-select');
+    sel.innerHTML = '<option value="">Select collection...</option>' + cols.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+    openModal('team-details-modal');
+  } catch(e) { console.error(e); toast('Error loading team','error'); }
+}
+
+async function inviteMember() {
+  const email = document.getElementById('invite-email').value.trim();
+  const role = document.getElementById('invite-role').value;
+  if(!email) { toast('Enter an email','error'); return; }
+  try {
+    const res = await fetch(`/api/teams/${_currentTeamId}/invite`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email, role})});
+    if(!res.ok) { const e = await res.json(); toast(e.error||'Failed','error'); return; }
+    document.getElementById('invite-email').value = '';
+    toast('Member added!');
+    openTeamDetails(_currentTeamId);
+  } catch(e) { toast('Error','error'); }
+}
+
+async function removeMember(tid, uid) {
+  try {
+    const res = await fetch(`/api/teams/${tid}/members/${uid}`, {method:'DELETE'});
+    if(!res.ok) { const e = await res.json(); toast(e.error||'Failed','error'); return; }
+    toast('Member removed');
+    openTeamDetails(tid);
+  } catch(e) { toast('Error','error'); }
+}
+
+async function shareCollection() {
+  const cid = document.getElementById('share-collection-select').value;
+  if(!cid) { toast('Select a collection','error'); return; }
+  try {
+    const res = await fetch(`/api/teams/${_currentTeamId}/collections`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({collection_id:parseInt(cid)})});
+    if(!res.ok) { const e = await res.json(); toast(e.error||'Failed','error'); return; }
+    toast('Collection shared!');
+    openTeamDetails(_currentTeamId);
+  } catch(e) { toast('Error','error'); }
+}
+
+async function unshareCollection(tid, cid) {
+  try {
+    await fetch(`/api/teams/${tid}/collections/${cid}`, {method:'DELETE'});
+    toast('Unshared');
+    openTeamDetails(tid);
+  } catch(e) { toast('Error','error'); }
+}
+
+// ══════════════════════════════════════════════════════════
+//  TEST SUITES & CI/CD
+// ══════════════════════════════════════════════════════════
+let _allCollections = [];
+
+async function loadTestSuites() {
+  try {
+    const [suitesRes, colsRes] = await Promise.all([fetch('/api/test-suites'), fetch('/api/collections')]);
+    const suites = await suitesRes.json();
+    _allCollections = await colsRes.json();
+    const list = document.getElementById('suites-list');
+    if(!suites.length) { list.innerHTML = '<p style="color:var(--txt3);font-size:12px">No test suites yet. Create one to group collections for automated testing.</p>'; return; }
+    list.innerHTML = suites.map(s => {
+      const colNames = (s.collection_ids||[]).map(id => { const c = _allCollections.find(x=>x.id===id); return c?c.name:'Unknown'; }).join(', ');
+      const statusColor = s.status==='passed'?'var(--green)':s.status==='failed'?'var(--red)':s.status==='running'?'var(--yellow)':'var(--txt3)';
+      return `
+        <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <div>
+              <span style="font-size:13px;font-weight:700">${esc(s.name)}</span>
+              <span style="font-size:10px;color:${statusColor};margin-left:8px;text-transform:uppercase">${s.status}</span>
+            </div>
+            <div style="display:flex;gap:6px">
+              <button class="icon-btn accent" style="font-size:10px;padding:4px 10px" onclick="runTestSuite(${s.id})">Run</button>
+              <button class="icon-btn" style="font-size:10px;padding:4px 10px" onclick="viewSuiteResults(${s.id})">History</button>
+              <button class="icon-btn danger" style="font-size:10px;padding:4px 10px" onclick="deleteTestSuite(${s.id})">&times;</button>
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--txt3)">Collections: ${esc(colNames) || 'None'}</div>
+          ${s.last_run ? `<div style="font-size:10px;color:var(--txt3);margin-top:4px">Last run: ${s.last_run}</div>` : ''}
+        </div>
+      `;
+    }).join('');
+  } catch(e) { console.error(e); }
+}
+
+function showCreateSuiteModal() {
+  document.getElementById('new-suite-name').value = '';
+  const picker = document.getElementById('suite-collections-picker');
+  if(!_allCollections.length) { toast('Load collections first','error'); }
+  picker.innerHTML = _allCollections.map(c => `
+    <label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px;cursor:pointer">
+      <input type="checkbox" value="${c.id}" class="suite-col-cb"> ${esc(c.name)}
+    </label>
+  `).join('');
+  openModal('create-suite-modal');
+}
+
+async function createTestSuite() {
+  const name = document.getElementById('new-suite-name').value.trim();
+  if(!name) { toast('Enter a suite name','error'); return; }
+  const colIds = [...document.querySelectorAll('.suite-col-cb:checked')].map(cb => parseInt(cb.value));
+  if(!colIds.length) { toast('Select at least one collection','error'); return; }
+  try {
+    const res = await fetch('/api/test-suites', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, collection_ids:colIds})});
+    if(!res.ok) { const e = await res.json(); toast(e.error||'Failed','error'); return; }
+    closeModal('create-suite-modal');
+    toast('Suite created!');
+    loadTestSuites();
+  } catch(e) { toast('Error','error'); }
+}
+
+async function runTestSuite(sid) {
+  toast('Running suite...');
+  try {
+    const res = await fetch(`/api/test-suites/${sid}/run`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({triggered_by:'manual'})});
+    const data = await res.json();
+    if(!res.ok) { toast(data.error||'Failed','error'); return; }
+    const s = data.summary;
+    const msg = `Suite done: ${s.passed} passed, ${s.failed} failed (${s.duration_ms}ms)`;
+    toast(msg, s.failed > 0 ? 'error' : 'success');
+    loadTestSuites();
+  } catch(e) { toast('Error running suite','error'); }
+}
+
+async function viewSuiteResults(sid) {
+  try {
+    const res = await fetch(`/api/test-results?suite_id=${sid}&limit=20`);
+    const results = await res.json();
+    const panel = document.getElementById('suite-results-panel');
+    const list = document.getElementById('suite-results-list');
+    panel.style.display = 'block';
+    if(!results.length) { list.innerHTML = '<p style="color:var(--txt3);font-size:11px">No runs yet</p>'; return; }
+    list.innerHTML = results.map(r => {
+      const statusColor = r.status==='passed'?'var(--green)':'var(--red)';
+      return `
+        <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:10px;font-size:11px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="color:${statusColor};font-weight:700;text-transform:uppercase">${r.status}</span>
+            <span style="color:var(--txt3)">${r.triggered_by} | ${r.started_at}</span>
+          </div>
+          <div style="color:var(--txt2);margin-top:4px">${r.passed} passed, ${r.failed} failed | ${Math.round(r.duration_ms||0)}ms</div>
+          <div style="margin-top:6px;display:flex;gap:6px">
+            <a href="/api/ci/run/${r.id}/junit" target="_blank" style="color:var(--acc);font-size:10px">JUnit XML</a>
+            <a href="/api/ci/run/${r.id}/json" target="_blank" style="color:var(--acc);font-size:10px">JSON</a>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch(e) { toast('Error loading results','error'); }
+}
+
+async function deleteTestSuite(sid) {
+  if(!confirm('Delete this test suite?')) return;
+  try {
+    await fetch(`/api/test-suites/${sid}`, {method:'DELETE'});
+    toast('Deleted');
+    loadTestSuites();
+  } catch(e) { toast('Error','error'); }
+}
+
+// CI Tokens
+async function loadCITokens() {
+  try {
+    const res = await fetch('/api/ci/tokens');
+    const tokens = await res.json();
+    const list = document.getElementById('ci-tokens-list');
+    if(!tokens.length) { list.innerHTML = '<p style="color:var(--txt3);font-size:11px">No CI tokens yet.</p>'; return; }
+    list.innerHTML = tokens.map(t => `
+      <div style="display:flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;font-size:11px">
+        <span style="font-weight:600">${esc(t.name)}</span>
+        <span style="flex:1;color:var(--txt3)">Created: ${t.created}</span>
+        ${t.last_used ? `<span style="color:var(--txt3)">Last used: ${t.last_used}</span>` : ''}
+        <button class="icon-btn danger" style="font-size:10px;padding:2px 8px" onclick="deleteCIToken(${t.id})">&times;</button>
+      </div>
+    `).join('');
+  } catch(e) { console.error(e); }
+}
+
+async function createCIToken() {
+  const name = document.getElementById('ci-token-name').value.trim();
+  if(!name) { toast('Enter a token name','error'); return; }
+  try {
+    const res = await fetch('/api/ci/tokens', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})});
+    const data = await res.json();
+    if(!res.ok) { toast(data.error||'Failed','error'); return; }
+    document.getElementById('ci-token-name').value = '';
+    prompt('Copy your CI token (it won\'t be shown again):', data.token);
+    loadCITokens();
+  } catch(e) { toast('Error','error'); }
+}
+
+async function deleteCIToken(id) {
+  if(!confirm('Revoke this token?')) return;
+  try {
+    await fetch(`/api/ci/tokens/${id}`, {method:'DELETE'});
+    toast('Token revoked');
+    loadCITokens();
+  } catch(e) { toast('Error','error'); }
+}
+
+// ══════════════════════════════════════════════════════════
+//  API DOCUMENTATION
+// ══════════════════════════════════════════════════════════
+let _docsCollectionId = null;
+
+async function loadDocsCollections() {
+  try {
+    const res = await fetch('/api/collections');
+    const cols = await res.json();
+    const sel = document.getElementById('docs-collection-select');
+    sel.innerHTML = '<option value="">Select collection...</option>' + cols.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  } catch(e) { console.error(e); }
+}
+
+async function loadDocsForCollection() {
+  const cid = document.getElementById('docs-collection-select').value;
+  if(!cid) { document.getElementById('docs-content-area').innerHTML = '<p style="color:var(--txt3);font-size:12px">Select a collection to generate API documentation.</p>'; return; }
+  _docsCollectionId = parseInt(cid);
+  try {
+    const res = await fetch('/api/docs/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({collection_id:_docsCollectionId})});
+    const spec = await res.json();
+    renderDocs(spec);
+  } catch(e) { toast('Error generating docs','error'); }
+}
+
+function renderDocs(spec) {
+  const area = document.getElementById('docs-content-area');
+  if(!spec.paths || !Object.keys(spec.paths).length) {
+    area.innerHTML = '<p style="color:var(--txt3);font-size:12px">No endpoints found in this collection.</p>';
+    return;
+  }
+  let html = `<h3 style="font-size:14px;font-weight:700;margin-bottom:4px">${esc(spec.info.title)}</h3>`;
+  html += `<p style="font-size:12px;color:var(--txt3);margin-bottom:16px">${esc(spec.info.description||'')} &middot; v${spec.info.version}</p>`;
+  for(const [path, methods] of Object.entries(spec.paths)) {
+    for(const [method, op] of Object.entries(methods)) {
+      const mColor = {get:'var(--green)',post:'var(--blue)',put:'var(--yellow)',delete:'var(--red)',patch:'var(--purple)'}[method]||'var(--txt2)';
+      html += `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px;margin-bottom:10px">`;
+      html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">`;
+      html += `<span style="background:${mColor};color:#000;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;text-transform:uppercase">${method}</span>`;
+      html += `<code style="font-size:12px;color:var(--txt)">${esc(path)}</code></div>`;
+      html += `<p style="font-size:12px;color:var(--txt2);margin-bottom:8px">${esc(op.summary||'')}</p>`;
+      if(op.parameters && op.parameters.length) {
+        html += '<table style="width:100%;font-size:11px;border-collapse:collapse;margin-bottom:8px"><tr style="background:var(--bg3)"><th style="padding:4px 8px;text-align:left">Name</th><th style="padding:4px 8px;text-align:left">In</th><th style="padding:4px 8px;text-align:left">Example</th></tr>';
+        for(const p of op.parameters) {
+          html += `<tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 8px">${esc(p.name)}</td><td style="padding:4px 8px;color:var(--txt3)">${esc(p.in)}</td><td style="padding:4px 8px;font-family:var(--mono);color:var(--txt3)">${esc(String(p.example||''))}</td></tr>`;
+        }
+        html += '</table>';
+      }
+      if(op.requestBody) {
+        html += '<details style="margin-top:6px"><summary style="font-size:11px;cursor:pointer;color:var(--acc)">Request Body</summary>';
+        for(const [ct, ctData] of Object.entries(op.requestBody.content||{})) {
+          html += `<p style="font-size:10px;color:var(--txt3);margin:4px 0">Content-Type: ${ct}</p>`;
+          if(ctData.schema) html += `<pre style="background:var(--bg0);padding:8px;border-radius:var(--radius);font-size:11px;overflow:auto;font-family:var(--mono);color:var(--txt2)">${esc(JSON.stringify(ctData.schema,null,2))}</pre>`;
+        }
+        html += '</details>';
+      }
+      html += '</div>';
+    }
+  }
+  area.innerHTML = html;
+}
+
+async function exportDocs(format) {
+  if(!_docsCollectionId) { toast('Select a collection first','error'); return; }
+  try {
+    const res = await fetch(`/api/docs/${_docsCollectionId}/${format}`);
+    if(!res.ok) { toast('Export failed','error'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const ext = format === 'openapi' ? 'json' : format === 'markdown' ? 'md' : 'html';
+    a.download = `api_docs.${ext}`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast(`Exported as ${format.toUpperCase()}`);
+  } catch(e) { toast('Error exporting','error'); }
+}
+
+// ══════════════════════════════════════════════════════════
+//  CODE GENERATION
+// ══════════════════════════════════════════════════════════
+function openCodeGen() {
+  const t = currentTab();
+  if(!t) { toast('No active request','error'); return; }
+  generateCode();
+  openModal('code-gen-modal');
+}
+
+async function generateCode() {
+  const t = currentTab();
+  if(!t) return;
+  const target = document.getElementById('code-target').value;
+  const reqData = {
+    method: t.method || 'GET',
+    url: t.url || '',
+    headers: (t.headers||[]).filter(h=>h.key),
+    params: (t.params||[]).filter(p=>p.key),
+    body_type: t.bodyType || 'none',
+    body_content: t.body || '',
+    auth_type: t.authType || 'none',
+    auth_data: t.authData || {}
+  };
+  try {
+    const res = await fetch('/api/code/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({target, request:reqData})});
+    const data = await res.json();
+    document.getElementById('code-output').textContent = data.code || '// No code generated';
+  } catch(e) {
+    document.getElementById('code-output').textContent = '// Error generating code';
+  }
+}
+
+function copyGeneratedCode() {
+  const code = document.getElementById('code-output').textContent;
+  navigator.clipboard.writeText(code).then(() => toast('Copied!')).catch(() => toast('Copy failed','error'));
+}
+
+// ══════════════════════════════════════════════════════════
+//  BACKUP & RESTORE
+// ══════════════════════════════════════════════════════════
+async function downloadBackup() {
+  try {
+    const res = await fetch('/api/backup/download');
+    if(!res.ok) { toast('Export failed','error'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const cd = res.headers.get('Content-Disposition');
+    a.download = cd ? cd.split('filename=')[1] : 'requestlab_backup.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('Backup downloaded!');
+  } catch(e) { toast('Error downloading backup','error'); }
+}
+
+async function uploadBackup(file) {
+  if(!file) return;
+  const mode = document.getElementById('restore-mode').value;
+  if(mode === 'replace' && !confirm('This will REPLACE all your data. Continue?')) return;
+  const status = document.getElementById('backup-status');
+  status.textContent = 'Uploading...';
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('mode', mode);
+    const res = await fetch('/api/backup/upload', {method:'POST', body:formData});
+    const data = await res.json();
+    if(!res.ok) { status.textContent = 'Error: ' + (data.error||'Unknown'); toast(data.error||'Failed','error'); return; }
+    const imp = data.imported;
+    status.textContent = `Restored: ${imp.collections} collections, ${imp.environments} environments, ${imp.mock_endpoints} mocks`;
+    toast('Backup restored!');
+    loadCollections();
+  } catch(e) { status.textContent = 'Error uploading backup'; toast('Error','error'); }
+}
+
+// ══════════════════════════════════════════════════════════
+//  API MONITOR
+// ══════════════════════════════════════════════════════════
+async function loadMonitors() {
+  try {
+    const res = await fetch('/api/monitors');
+    const monitors = await res.json();
+    const list = document.getElementById('monitors-list');
+    if(!monitors.length) { list.innerHTML = '<p style="color:var(--txt3);font-size:12px">No monitors yet. Create one to start tracking API uptime.</p>'; return; }
+    list.innerHTML = monitors.map(m => {
+      const statusColor = m.last_status==='success'?'var(--green)':m.last_status==='failure'?'var(--red)':'var(--txt3)';
+      const statusIcon = m.last_status==='success'?'\u25CF':m.last_status==='failure'?'\u25CF':'\u25CB';
+      const uptimeColor = m.uptime_pct >= 99 ? 'var(--green)' : m.uptime_pct >= 95 ? 'var(--yellow)' : 'var(--red)';
+      return `
+        <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="color:${statusColor};font-size:14px">${statusIcon}</span>
+              <span style="font-size:13px;font-weight:700">${esc(m.name)}</span>
+              <span style="font-size:10px;padding:2px 6px;border-radius:4px;background:var(--bg3);color:var(--txt3)">${m.method} ${esc(m.url)}</span>
+            </div>
+            <div style="display:flex;gap:6px">
+              <button class="icon-btn accent" style="font-size:10px;padding:4px 10px" onclick="runMonitor(${m.id})">Run Now</button>
+              <button class="icon-btn" style="font-size:10px;padding:4px 10px" onclick="viewMonitorLogs(${m.id},'${esc(m.name)}')">Logs</button>
+              <button class="icon-btn" style="font-size:10px;padding:4px 10px" onclick="editMonitor(${m.id})">Edit</button>
+              <button class="icon-btn danger" style="font-size:10px;padding:4px 10px" onclick="deleteMonitor(${m.id})">&times;</button>
+            </div>
+          </div>
+          <div style="display:flex;gap:16px;font-size:11px;color:var(--txt3)">
+            <span>Uptime: <span style="color:${uptimeColor};font-weight:600">${m.uptime_pct}%</span></span>
+            <span>Checks: ${m.total_checks}</span>
+            <span>Failures: <span style="color:${m.total_failures>0?'var(--red)':'inherit'}">${m.total_failures}</span></span>
+            ${m.last_duration_ms ? `<span>Last: ${Math.round(m.last_duration_ms)}ms</span>` : ''}
+            ${m.last_check ? `<span>Checked: ${m.last_check}</span>` : '<span>Never checked</span>'}
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch(e) { console.error(e); }
+}
+
+function showCreateMonitorModal() {
+  document.getElementById('mon-name').value = '';
+  document.getElementById('mon-url').value = '';
+  document.getElementById('mon-method').value = 'GET';
+  document.getElementById('mon-expected-status').value = '200';
+  document.getElementById('mon-interval').value = '300';
+  document.getElementById('mon-expected-body').value = '';
+  document.getElementById('mon-edit-id').value = '';
+  document.getElementById('monitor-modal-title').textContent = 'New Monitor';
+  openModal('create-monitor-modal');
+}
+
+async function editMonitor(id) {
+  try {
+    const res = await fetch('/api/monitors');
+    const monitors = await res.json();
+    const m = monitors.find(x => x.id === id);
+    if(!m) { toast('Monitor not found','error'); return; }
+    document.getElementById('mon-name').value = m.name;
+    document.getElementById('mon-url').value = m.url;
+    document.getElementById('mon-method').value = m.method;
+    document.getElementById('mon-expected-status').value = m.expected_status;
+    document.getElementById('mon-interval').value = m.interval_seconds;
+    document.getElementById('mon-expected-body').value = m.expected_body || '';
+    document.getElementById('mon-edit-id').value = id;
+    document.getElementById('monitor-modal-title').textContent = 'Edit Monitor';
+    openModal('create-monitor-modal');
+  } catch(e) { toast('Error','error'); }
+}
+
+async function saveMonitor() {
+  const id = document.getElementById('mon-edit-id').value;
+  const data = {
+    name: document.getElementById('mon-name').value.trim(),
+    url: document.getElementById('mon-url').value.trim(),
+    method: document.getElementById('mon-method').value,
+    expected_status: parseInt(document.getElementById('mon-expected-status').value) || 200,
+    interval_seconds: parseInt(document.getElementById('mon-interval').value) || 300,
+    expected_body: document.getElementById('mon-expected-body').value.trim()
+  };
+  if(!data.name || !data.url) { toast('Name and URL required','error'); return; }
+  try {
+    const method = id ? 'PUT' : 'POST';
+    const url = id ? `/api/monitors/${id}` : '/api/monitors';
+    const res = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+    if(!res.ok) { const e = await res.json(); toast(e.error||'Failed','error'); return; }
+    closeModal('create-monitor-modal');
+    toast(id ? 'Monitor updated!' : 'Monitor created!');
+    loadMonitors();
+  } catch(e) { toast('Error','error'); }
+}
+
+async function runMonitor(id) {
+  toast('Running check...');
+  try {
+    const res = await fetch(`/api/monitors/${id}/run`, {method:'POST'});
+    const data = await res.json();
+    if(data.status === 'success') toast(`Check passed (${data.duration_ms}ms)`);
+    else toast(`Check failed: ${data.error||'Unknown'}`, 'error');
+    loadMonitors();
+  } catch(e) { toast('Error','error'); }
+}
+
+async function deleteMonitor(id) {
+  if(!confirm('Delete this monitor?')) return;
+  try {
+    await fetch(`/api/monitors/${id}`, {method:'DELETE'});
+    toast('Deleted');
+    loadMonitors();
+  } catch(e) { toast('Error','error'); }
+}
+
+async function viewMonitorLogs(id, name) {
+  document.getElementById('monitor-logs-title').textContent = `Logs: ${name}`;
+  try {
+    const res = await fetch(`/api/monitors/${id}/logs?limit=50`);
+    const logs = await res.json();
+    const content = document.getElementById('monitor-logs-content');
+    if(!logs.length) { content.innerHTML = '<p style="color:var(--txt3);font-size:12px">No logs yet. Run the monitor first.</p>'; openModal('monitor-logs-modal'); return; }
+    content.innerHTML = logs.map(l => {
+      const sc = l.status === 'success' ? 'var(--green)' : 'var(--red)';
+      return `
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);font-size:11px">
+          <span style="color:${sc};font-weight:700;text-transform:uppercase;width:60px">${l.status}</span>
+          <span style="color:var(--txt2)">${l.status_code || '-'}</span>
+          <span style="color:var(--txt3)">${Math.round(l.duration_ms||0)}ms</span>
+          <span style="flex:1;color:var(--txt3)">${l.checked_at}</span>
+          ${l.error ? `<span style="color:var(--red);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.error)}">${esc(l.error)}</span>` : ''}
+        </div>
+      `;
+    }).join('');
+    openModal('monitor-logs-modal');
+  } catch(e) { toast('Error loading logs','error'); }
+}
+
 </script>
 </body>
 </html>"""

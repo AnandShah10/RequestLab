@@ -56,9 +56,12 @@ python postman.py
 - **URL Bar**: Smart variable highlighting and substitution
 - **Query Params**: Key-value table with enable/disable toggles
 - **Custom Headers**: Full header customization
+- **Cookies**: Per-request cookie management with key-value table
 - **Body Types**: JSON, GraphQL, raw text, form-data (with files), x-www-form-urlencoded, SOAP, XML
 - **Authentication**: No auth, Basic Auth, Bearer Token, OAuth 2.0, API Key, AWS Signature V4
 - **File Uploads**: Native `multipart/form-data` support with file picker
+- **Pre-Processor**: Python script that runs before the request (modify headers, params, set variables)
+- **Post-Processor**: Python script that runs after the response (validate, transform, extract data)
 
 ### 📊 Response Viewer
 - **Pretty Mode**: Syntax-highlighted, formatted JSON/XML
@@ -79,6 +82,66 @@ python postman.py
 ---
 
 ## 🧪 Advanced Features
+
+### 👥 Team Collaboration
+Built-in team management for shared API workflows:
+
+- ✅ **Create Teams**: Organize members into teams with custom names
+- ✅ **Role-Based Access**: Admin, Editor, and Viewer roles per team
+- ✅ **Invite Members**: Add team members by email with role assignment
+- ✅ **Shared Collections**: Share collections with teams for collaborative testing
+- ✅ **Team Management**: View members, change roles, remove members
+
+### 🔄 CI/CD Integration & Test Suites
+Automate API testing in your CI/CD pipeline:
+
+- ✅ **Test Suites**: Group collections into test suites for organized testing
+- ✅ **Test Results**: Detailed pass/fail reports with assertion results per run
+- ✅ **CI Tokens**: Generate API tokens for automated CI/CD pipelines
+- ✅ **CLI-Compatible**: Run test suites via API calls for integration with Jenkins, GitHub Actions, GitLab CI, etc.
+- ✅ **Scheduled Runs**: Trigger test suites programmatically
+
+### 📝 API Documentation
+Generate and share API documentation directly from RequestLab:
+
+- ✅ **Auto-Generate Docs**: Create documentation from saved requests
+- ✅ **OpenAPI Export**: Export collections as OpenAPI 3.0 specs
+- ✅ **Markdown Export**: Generate Markdown documentation
+- ✅ **HTML Export**: Produce standalone HTML documentation pages
+- ✅ **Public Sharing**: Share documentation via generated links
+- ✅ **Custom Descriptions**: Add detailed descriptions to documented endpoints
+
+### 💻 Code Generation
+Generate code snippets for any request in 10+ languages:
+
+- ✅ **cURL**: Command-line HTTP requests
+- ✅ **Python**: `requests` library code
+- ✅ **JavaScript**: `fetch` API code
+- ✅ **Node.js**: `axios` code
+- ✅ **Go**: `net/http` code
+- ✅ **Java**: `HttpClient` code
+- ✅ **C#**: `HttpClient` code
+- ✅ **PHP**: `cURL` code
+- ✅ **Ruby**: `net/http` code
+- ✅ **Rust**: `reqwest` code
+
+### 📡 API Monitor
+Track API uptime and performance:
+
+- ✅ **Create Monitors**: Define health checks for any API endpoint
+- ✅ **Configurable Checks**: Set HTTP method, headers, body, expected status
+- ✅ **Interval Scheduling**: Configure check intervals (seconds)
+- ✅ **Uptime Tracking**: Automatic uptime percentage calculation
+- ✅ **Check History**: View detailed logs with status, duration, and response body
+- ✅ **Failure Tracking**: Monitor total checks vs failures
+- ✅ **Enable/Disable**: Toggle monitors on and off
+
+### 💾 Backup & Restore
+Protect your data with full backup and restore:
+
+- ✅ **Export Backup**: Download complete workspace as JSON (collections, requests, environments, etc.)
+- ✅ **Import Backup**: Restore from a previous backup file
+- ✅ **Selective Data**: Backup includes all tables — users, collections, folders, requests, environments, mocks, history, teams, monitors, and more
 
 ### 🌍 Environments & Variables
 
@@ -273,7 +336,16 @@ RequestLab.db
 ├── environment_variables
 ├── history
 ├── mock_endpoints
-└── collection_runs
+├── collection_runs
+├── teams
+├── team_members
+├── shared_collections
+├── test_suites
+├── test_results
+├── ci_tokens
+├── api_docs
+├── monitors
+└── monitor_logs
 ```
 
 ### Deployment Options
@@ -380,6 +452,13 @@ See our [detailed comparison](COMPARISON.md) with Postman, OpenAPI, and Swagger.
 | **Mobile** | 📱 Full support | ❌ No | ✅ Responsive |
 | **Scripting** | 🐍 Python + JS | JavaScript only | ❌ No |
 | **Offline** | ✅ Full | ⚠️ Limited | ✅ Full |
+| **Teams** | 👥 Built-in | ✅ Cloud | ❌ No |
+| **Monitoring** | 📡 Built-in | ✅ Cloud | ❌ No |
+| **Code Gen** | 💻 10+ languages | ✅ 10+ | ❌ No |
+| **CI/CD** | 🔄 Test suites | ✅ Monitors | ❌ No |
+| **API Docs** | 📝 Generator | ✅ Auto | ✅ Primary |
+| **Backup** | 💾 JSON export | ☁️ Cloud | ❌ No |
+| **Cookies** | 🍪 Per-request | ✅ Manager | ❌ No |
 
 ---
 
@@ -464,19 +543,22 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [x] Responsive design
 - [x] Collapsible UI cards
 - [x] OpenAPI/Swagger import
+- [x] Team collaboration with roles & shared collections
+- [x] CI/CD integration with test suites & CI tokens
+- [x] API documentation generator (OpenAPI, Markdown, HTML)
+- [x] Code generation (10+ languages: cURL, Python, JS, Go, Java, etc.)
+- [x] Backup & restore (full workspace JSON export/import)
+- [x] API monitor with uptime tracking
+- [x] Request-level cookies
+- [x] Pre-processor and post-processor scripting tabs
 
 ### 🚧 In Progress
 - [ ] gRPC support
-- [ ] Code generation (cURL, Python, JavaScript)
-- [ ] API documentation generator
 - [ ] Request chaining
 
 ### 📋 Planned
-- [ ] Team collaboration (WebSocket sync)
 - [ ] Cloud backup/restore
 - [ ] Plugin system
-- [ ] CI/CD integration (CLI mode)
-- [ ] API monitoring
 - [ ] Data-driven testing (CSV/JSON)
 - [ ] Mobile app (React Native)
 
