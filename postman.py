@@ -3278,12 +3278,13 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .logo-text{font-weight:700;font-size:15px;letter-spacing:-.3px;color:var(--txt)}
 .logo-text span{color:var(--acc)}
 .top-nav{display:flex;height:100%;flex:1;padding:0 12px;gap:2px;align-items:center}
-.top-tab{padding:7px 14px;border-radius:var(--radius);font-size:12px;font-weight:600;cursor:pointer;color:var(--txt3);border:none;background:transparent;transition:all .15s;font-family:var(--sans);letter-spacing:.2px}
-.top-tab:hover{color:var(--txt2);background:var(--bg3)}
+.top-tab{padding:7px 14px;border-radius:var(--radius);font-size:12px;font-weight:600;cursor:pointer;color:var(--txt3);border:none;background:transparent;transition:all .2s cubic-bezier(0.2, 0.8, 0.2, 1);font-family:var(--sans);letter-spacing:.2px}
+.top-tab:hover{color:var(--txt2);background:var(--bg3);transform:translateY(-1px)}
+.top-tab:active{transform:translateY(0) scale(0.96)}
 .top-tab.active{color:var(--acc);background:var(--acc-dim)}
 .top-right{display:flex;align-items:center;gap:8px;padding:0 16px;margin-left:auto}
-.env-select{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius);padding:5px 10px;font-size:11px;color:var(--txt2);outline:none;cursor:pointer;font-family:var(--mono);transition:border-color .15s}
-.env-select:hover,.env-select:focus{border-color:var(--border3)}
+.env-select{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius);padding:5px 10px;font-size:11px;color:var(--txt2);outline:none;cursor:pointer;font-family:var(--mono);transition:all .2s}
+.env-select:hover,.env-select:focus{border-color:var(--border3);box-shadow:0 0 0 2px var(--acc-glow)}
 .conn-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green)}
 
 /* ── Sidebar ── */
@@ -3293,11 +3294,11 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .s-tab.active{color:var(--acc);border-bottom-color:var(--acc)}
 .sidebar-inner{flex:1;display:flex;flex-direction:column;overflow:hidden}
 .sidebar-toolbar{display:flex;align-items:center;gap:6px;padding:10px 10px 6px}
-.sidebar-search{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:6px 10px;font-size:11px;color:var(--txt);font-family:var(--mono);outline:none;transition:border-color .15s}
-.sidebar-search:focus{border-color:var(--acc)}
+.sidebar-search{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:6px 10px;font-size:11px;color:var(--txt);font-family:var(--mono);outline:none;transition:all .2s;box-shadow:inset 0 1px 3px rgba(0,0,0,0.1)}
+.sidebar-search:focus{border-color:var(--acc);box-shadow:0 0 0 2px var(--acc-glow)}
 .sidebar-search::placeholder{color:var(--txt3)}
-.script-editor{width:100%;min-height:280px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;font-size:12.5px;line-height:1.6;color:var(--txt);font-family:var(--mono);resize:vertical;outline:none;tab-size:4;transition:border-color .15s}
-.script-editor:focus{border-color:var(--acc)}
+.script-editor{width:100%;min-height:280px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;font-size:12.5px;line-height:1.6;color:var(--txt);font-family:var(--mono);resize:vertical;outline:none;tab-size:4;transition:all .2s;box-shadow:inset 0 1px 4px rgba(0,0,0,0.1)}
+.script-editor:focus{border-color:var(--acc);box-shadow:0 0 0 2px var(--acc-glow)}
 .script-editor::placeholder{color:var(--txt3);font-style:italic}
 #help-content h1{margin:0 0 14px;font-size:22px;font-weight:700;color:var(--txt)}
 #help-content h2{margin:0 0 14px;font-size:18px;font-weight:700;color:var(--txt)}
@@ -3309,10 +3310,11 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 #help-content code{background:var(--bg1);padding:1px 5px;border-radius:3px;font-size:12px;color:var(--acc)}
 #help-content pre{margin:0 0 12px}
 .help-nav-item:hover{background:var(--bg2) !important}
-.icon-btn{background:none;border:1px solid var(--border);color:var(--txt3);cursor:pointer;padding:5px 8px;border-radius:var(--radius);display:flex;align-items:center;font-size:12px;transition:all .15s;font-family:var(--mono)}
-.icon-btn:hover{color:var(--txt);background:var(--bg3);border-color:var(--border2)}
+.icon-btn{background:none;border:1px solid var(--border);color:var(--txt3);cursor:pointer;padding:5px 8px;border-radius:var(--radius);display:flex;align-items:center;font-size:12px;transition:all .2s cubic-bezier(0.2, 0.8, 0.2, 1);font-family:var(--mono)}
+.icon-btn:hover{color:var(--txt);background:var(--bg3);border-color:var(--border2);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,0.2)}
+.icon-btn:active{transform:translateY(0) scale(0.96)}
 .icon-btn.accent{border-color:var(--acc-dim);color:var(--acc)}
-.icon-btn.accent:hover{background:var(--acc-dim)}
+.icon-btn.accent:hover{background:var(--acc-dim);box-shadow:0 0 12px var(--acc-glow)}
 .sidebar-scroll{flex:1;overflow-y:auto;padding:4px 8px 12px}
 
 /* ── Collection tree ── */
@@ -4197,9 +4199,9 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
       <button class="top-tab" onclick="switchView('testsuites')">Test Suites</button>
       <button class="top-tab" onclick="switchView('docs')">Docs</button>
       <button class="top-tab" onclick="switchView('monitor')">Monitor</button>
-      <button class="top-tab" onclick="switchView('settings')">Settings</button>
     </div>
     <div class="top-right">
+      <button class="icon-btn" onclick="openSettingsModal()" title="Settings" style="border:none;font-size:16px;">⚙️</button>
       <button class="icon-btn" onclick="openHelpModal()" title="Documentation & Shortcuts" style="border:none;font-size:15px;font-weight:700;color:var(--acc)">?</button>
       <button class="icon-btn" onclick="toggleTheme()" title="Toggle Theme" id="theme-btn" style="border:none;font-size:16px;">☀️</button>
       <select id="env-selector" class="env-select" onchange="selectEnv(this.value)">
@@ -4342,8 +4344,10 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
               <div class="body-editor-toolbar">
                 <span class="editor-hint"><kbd>Ctrl</kbd>+<kbd>/</kbd> comment • <kbd>Ctrl</kbd>+<kbd>B</kbd> beautify • <kbd>Tab</kbd> indent</span>
               </div>
-              <textarea class="code-editor" id="body-editor" style="position:relative; z-index:1; background:transparent; color:transparent; caret-color:var(--txt); white-space:pre;" placeholder="Enter request body…" spellcheck="false" oninput="markTabDirty(); updateBodyHighlight()" onscroll="document.getElementById('body-highlight-layer').scrollTop = this.scrollTop; document.getElementById('body-highlight-layer').scrollLeft = this.scrollLeft;" onkeydown="handleBodyKeydown(event)"></textarea>
-              <pre id="body-highlight-layer" class="code-editor" style="position:absolute; top:33px; left:0; right:0; bottom:0; z-index:0; margin:0; pointer-events:none; white-space:pre; overflow:hidden; border-color:transparent; background:var(--bg2);"></pre>
+              <div style="position:relative; width:100%;">
+                <pre id="body-highlight-layer" class="code-editor" style="position:absolute; top:0; left:0; right:0; bottom:0; z-index:0; margin:0; pointer-events:none; white-space:pre; overflow:hidden; border-color:transparent; background:var(--bg2);"></pre>
+                <textarea class="code-editor" id="body-editor" style="position:relative; z-index:1; background:transparent; color:transparent; caret-color:var(--txt); white-space:pre; margin:0;" placeholder="Enter request body…" spellcheck="false" oninput="markTabDirty(); updateBodyHighlight()" onscroll="document.getElementById('body-highlight-layer').scrollTop = this.scrollTop; document.getElementById('body-highlight-layer').scrollLeft = this.scrollLeft;" onkeydown="handleBodyKeydown(event)"></textarea>
+              </div>
               <div class="body-error-bar" id="body-error-bar"><span class="err-icon">✕</span><span class="err-msg" id="body-error-msg"></span></div>
             </div>
             <div id="body-graphql-wrap" style="display:none; width:100%;">
@@ -4563,47 +4567,7 @@ pm.test('Status is 200', lambda: pm.response.get('status_code') == 200)" spellch
       </div>
     </div>
 
-    <!-- Settings View (CI/CD + Backup) -->
-    <div id="view-settings" style="display:none;flex-direction:column;overflow:hidden;flex:1;min-height:0">
-      <div style="padding:14px 20px;border-bottom:1px solid var(--border);background:var(--bg1)">
-        <h2 style="font-size:14px;font-weight:700">Settings</h2>
-        <p style="font-size:11px;color:var(--txt3);margin-top:2px">CI/CD integration, backup &amp; restore</p>
-      </div>
-      <div style="flex:1;overflow-y:auto;padding:16px 20px">
-        <div style="margin-bottom:24px">
-          <h3 style="font-size:13px;font-weight:700;margin-bottom:12px">CI/CD Integration</h3>
-          <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
-            <input id="ci-token-name" class="sidebar-search" placeholder="Token name..." style="max-width:200px">
-            <button class="icon-btn accent" onclick="createCIToken()" style="padding:6px 14px;font-size:11px">Generate Token</button>
-          </div>
-          <div id="ci-tokens-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px"></div>
-          <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px;font-size:12px">
-            <h4 style="font-size:12px;font-weight:700;margin-bottom:8px">CI/CD Usage</h4>
-            <p style="color:var(--txt3);font-size:11px;margin-bottom:8px">Run test suites from your CI pipeline:</p>
-            <pre style="background:var(--bg0);padding:10px;border-radius:var(--radius);font-size:11px;overflow-x:auto;color:var(--txt2);font-family:var(--mono)">curl -X POST http://localhost:5000/api/ci/run \
-  -H "X-CI-Token: YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"suite_id": 1, "format": "junit"}'</pre>
-            <p style="color:var(--txt3);font-size:11px;margin-top:8px">Get results as JUnit XML for CI integration or JSON for custom processing.</p>
-          </div>
-        </div>
-        <div>
-          <h3 style="font-size:13px;font-weight:700;margin-bottom:12px">Backup &amp; Restore</h3>
-          <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <button class="icon-btn accent" onclick="downloadBackup()" style="padding:8px 18px;font-size:11px">Export Backup</button>
-            <label class="icon-btn" style="padding:8px 18px;font-size:11px;cursor:pointer">
-              Import Backup
-              <input type="file" accept=".json" onchange="uploadBackup(this.files[0])" style="display:none">
-            </label>
-            <select id="restore-mode" class="env-select" style="min-width:100px">
-              <option value="merge">Merge</option>
-              <option value="replace">Replace All</option>
-            </select>
-          </div>
-          <div id="backup-status" style="margin-top:10px;font-size:11px;color:var(--txt3)"></div>
-        </div>
-      </div>
-    </div>
+
 
     <!-- Monitor View -->
     <div id="view-monitor" style="display:none;flex-direction:column;overflow:hidden;flex:1;min-height:0">
@@ -4893,6 +4857,86 @@ pm.test('Status is 200', lambda: pm.response.get('status_code') == 200)" spellch
   </div>
 </div>
 
+<!-- ══ Settings Modal ══ -->
+<div class="modal-overlay" id="settings-modal">
+  <div class="modal" style="width:960px;height:80vh;max-height:90vh;display:flex;flex-direction:column">
+    <div class="modal-header"><h3>Settings</h3><button class="modal-close" onclick="closeModal('settings-modal')">&times;</button></div>
+    <div style="display:flex;flex:1;overflow:hidden">
+      <div style="width:180px;min-width:180px;border-right:1px solid var(--border);background:var(--bg1);display:block;padding-top:16px;">
+        <button class="s-tab active" id="settings-tab-cicd" onclick="switchSettingsTab('cicd')" style="display:block;width:100%;text-align:left;padding:10px 16px;border-bottom:1px solid var(--border);border-left:2px solid var(--acc);font-size:12px;font-weight:600;text-transform:none;height:auto;background:transparent;color:var(--txt1);">CI/CD Integration</button>
+        <button class="s-tab" id="settings-tab-backup" onclick="switchSettingsTab('backup')" style="display:block;width:100%;text-align:left;padding:10px 16px;border-bottom:1px solid var(--border);border-left:2px solid transparent;font-size:12px;font-weight:600;text-transform:none;height:auto;background:transparent;color:var(--txt1);">Backup &amp; Restore</button>
+        <button class="s-tab" id="settings-tab-appearance" onclick="switchSettingsTab('appearance')" style="display:block;width:100%;text-align:left;padding:10px 16px;border-bottom:1px solid var(--border);border-left:2px solid transparent;font-size:12px;font-weight:600;text-transform:none;height:auto;background:transparent;color:var(--txt1);">Appearance</button>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:32px">
+        <!-- CI/CD Tab -->
+        <div id="settings-pane-cicd">
+          <h3 style="font-size:16px;font-weight:700;margin-bottom:20px">CI/CD Integration</h3>
+          <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+            <input id="ci-token-name" class="sidebar-search" placeholder="Token name..." style="max-width:200px">
+            <button class="icon-btn accent" onclick="createCIToken()" style="padding:6px 14px;font-size:11px">Generate Token</button>
+          </div>
+          <div id="ci-tokens-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px"></div>
+          <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px;font-size:12px">
+            <h4 style="font-size:12px;font-weight:700;margin-bottom:8px">CI/CD Usage</h4>
+            <p style="color:var(--txt3);font-size:11px;margin-bottom:8px">Run test suites from your CI pipeline:</p>
+            <pre style="background:var(--bg0);padding:10px;border-radius:var(--radius);font-size:11px;overflow-x:auto;color:var(--txt2);font-family:var(--mono)">curl -X POST http://localhost:5000/api/ci/run \
+  -H "X-CI-Token: YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"suite_id": 1, "format": "junit"}'</pre>
+            <p style="color:var(--txt3);font-size:11px;margin-top:8px">Get results as JUnit XML for CI integration or JSON for custom processing.</p>
+          </div>
+        </div>
+        <!-- Backup Tab -->
+        <div id="settings-pane-backup" style="display:none">
+          <h3 style="font-size:16px;font-weight:700;margin-bottom:20px">Backup &amp; Restore</h3>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="icon-btn accent" onclick="downloadBackup()" style="padding:8px 18px;font-size:11px">Export Backup</button>
+            <label class="icon-btn" style="padding:8px 18px;font-size:11px;cursor:pointer">
+              Import Backup
+              <input type="file" accept=".json" onchange="uploadBackup(this.files[0])" style="display:none">
+            </label>
+            <select id="restore-mode" class="env-select" style="min-width:100px">
+              <option value="merge">Merge</option>
+              <option value="replace">Replace All</option>
+            </select>
+          </div>
+          <div id="backup-status" style="margin-top:10px;font-size:11px;color:var(--txt3)"></div>
+        </div>
+        <!-- Appearance Tab -->
+        <div id="settings-pane-appearance" style="display:none">
+          <h3 style="font-size:16px;font-weight:700;margin-bottom:8px">Appearance &amp; Customization</h3>
+          <p style="font-size:12px;color:var(--txt3);margin-bottom:24px">Customize UI colors and styles. Leave blank to use defaults. (Settings are saved to your browser's localStorage)</p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:24px">
+            <div>
+              <label style="display:block;font-size:11px;color:var(--txt2);margin-bottom:4px">Accent Color</label>
+              <input type="color" id="custom-ui-accent" class="sidebar-search" value="#00d4ff" style="width:100%;height:38px;padding:2px">
+            </div>
+            <div>
+              <label style="display:block;font-size:11px;color:var(--txt2);margin-bottom:4px">Background Base</label>
+              <input type="color" id="custom-ui-bg0" class="sidebar-search" value="#080c10" style="width:100%;height:38px;padding:2px">
+            </div>
+            <div>
+              <label style="display:block;font-size:11px;color:var(--txt2);margin-bottom:4px">Font Family</label>
+              <input type="text" id="custom-ui-font" class="sidebar-search" placeholder="'Space Grotesk', sans-serif" style="width:100%">
+            </div>
+            <div>
+              <label style="display:block;font-size:11px;color:var(--txt2);margin-bottom:4px">Border Radius (e.g. 5px)</label>
+              <input type="text" id="custom-ui-radius" class="sidebar-search" placeholder="5px" style="width:100%">
+            </div>
+          </div>
+          <label style="display:block;font-size:11px;color:var(--txt2);margin-bottom:4px">Advanced: Custom CSS Rules</label>
+          <textarea id="custom-ui-css" class="script-editor" style="min-height:120px;margin-bottom:12px;font-family:var(--mono);font-size:11px" placeholder="body { background: red !important; }"></textarea>
+          <div style="display:flex;gap:10px">
+            <button class="icon-btn accent" onclick="applyCustomUI()" style="padding:8px 18px;font-size:11px">Apply &amp; Save</button>
+            <button class="icon-btn" onclick="resetCustomUI()" style="padding:8px 18px;font-size:11px">Reset to Defaults</button>
+          </div>
+          <div id="custom-ui-status" style="margin-top:10px;font-size:11px;color:var(--green)"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ══ Help / Documentation Modal ══ -->
 <div class="modal-overlay" id="help-modal">
   <div class="modal" style="width:780px;max-height:85vh;display:flex;flex-direction:column">
@@ -5045,7 +5089,7 @@ function closeTab(e,idx){
 function markTabDirty(){ const t=currentTab(); if(t&&!t.dirty){t.dirty=true;renderTabBar();} }
 
 // ══════════════════════════════════════════════════════════
-//  GLOBAL STATE & THEME
+//  GLOBAL STATE & THEME & CUSTOM UI
 // ══════════════════════════════════════════════════════════
 function toggleTheme() {
   const isLight = document.documentElement.getAttribute('data-theme') === 'light';
@@ -5057,6 +5101,83 @@ function toggleTheme() {
 if(localStorage.getItem('requestlab_theme') === 'light') {
   document.documentElement.setAttribute('data-theme', 'light');
 }
+
+function applyCustomUI() {
+  const accent = document.getElementById('custom-ui-accent').value.trim();
+  const bg0 = document.getElementById('custom-ui-bg0').value.trim();
+  const font = document.getElementById('custom-ui-font').value.trim();
+  const radius = document.getElementById('custom-ui-radius').value.trim();
+  const customCss = document.getElementById('custom-ui-css').value.trim();
+
+  const settings = { accent, bg0, font, radius, customCss };
+  localStorage.setItem('requestlab_custom_ui', JSON.stringify(settings));
+
+  injectCustomUI(settings);
+  
+  const status = document.getElementById('custom-ui-status');
+  if(status) {
+    status.textContent = 'Settings saved and applied successfully!';
+    setTimeout(() => status.textContent = '', 3000);
+  }
+}
+
+function resetCustomUI() {
+  localStorage.removeItem('requestlab_custom_ui');
+  document.getElementById('custom-ui-accent').value = '#00d4ff';
+  document.getElementById('custom-ui-bg0').value = '#080c10';
+  document.getElementById('custom-ui-font').value = '';
+  document.getElementById('custom-ui-radius').value = '';
+  document.getElementById('custom-ui-css').value = '';
+  
+  injectCustomUI({});
+  
+  const status = document.getElementById('custom-ui-status');
+  if(status) {
+    status.textContent = 'Settings reset to default!';
+    setTimeout(() => status.textContent = '', 3000);
+  }
+}
+
+function injectCustomUI(settings) {
+  let styleEl = document.getElementById('custom-theme-css');
+  if (!styleEl) {
+    styleEl = document.createElement('style');
+    styleEl.id = 'custom-theme-css';
+    document.head.appendChild(styleEl);
+  }
+
+  if (!settings || (!settings.accent && !settings.bg0 && !settings.font && !settings.radius && !settings.customCss)) {
+    styleEl.textContent = '';
+    return;
+  }
+
+  let cssVars = '';
+  if (settings.accent) cssVars += `--acc: ${settings.accent}; --acc-glow: ${settings.accent}60; --acc-dim: ${settings.accent}12; `;
+  if (settings.bg0) cssVars += `--bg0: ${settings.bg0}; `;
+  if (settings.font) cssVars += `--sans: ${settings.font}; `;
+  if (settings.radius) cssVars += `--radius: ${settings.radius}; `;
+
+  let finalCss = '';
+  if (cssVars) finalCss += `:root { ${cssVars} }\n`;
+  if (settings.customCss) finalCss += settings.customCss;
+
+  styleEl.textContent = finalCss;
+}
+
+// Load on startup
+try {
+  const savedUI = JSON.parse(localStorage.getItem('requestlab_custom_ui'));
+  if (savedUI) {
+    injectCustomUI(savedUI);
+    window.addEventListener('DOMContentLoaded', () => {
+      if(savedUI.accent) document.getElementById('custom-ui-accent').value = savedUI.accent;
+      if(savedUI.bg0) document.getElementById('custom-ui-bg0').value = savedUI.bg0;
+      if(savedUI.font) document.getElementById('custom-ui-font').value = savedUI.font;
+      if(savedUI.radius) document.getElementById('custom-ui-radius').value = savedUI.radius;
+      if(savedUI.customCss) document.getElementById('custom-ui-css').value = savedUI.customCss;
+    });
+  }
+} catch(e) {}
 
 const S = {
   globalVars:{}, bodyType:'none', authType:'none', authData:{}, response:null,
@@ -5338,10 +5459,10 @@ function toast(msg,type='info',dur=2800){
 //  VIEW / SIDEBAR SWITCHING
 // ══════════════════════════════════════════════════════════
 function switchView(v){
-  const views = ['builder','environments','mocks','runner','testsuites','docs','monitor','settings'];
+  const views = ['builder','environments','mocks','runner','testsuites','docs','monitor'];
   document.querySelectorAll('.top-tab').forEach((t,i)=>t.classList.toggle('active',views[i]===v));
   // Hide all sub-views inside view-builder (never hide view-builder itself)
-  const subViews = ['view-environments','view-mocks','view-runner','view-testsuites','view-docs','view-settings','view-monitor'];
+  const subViews = ['view-environments','view-mocks','view-runner','view-testsuites','view-docs','view-monitor'];
   subViews.forEach(id => { const el = document.getElementById(id); if(el) el.style.display = 'none'; });
   const reqTabsBar = document.getElementById('req-tabs-bar');
   const reqPanel = document.getElementById('request-panel');
@@ -5366,13 +5487,25 @@ function switchView(v){
   } else if(v==='docs') {
     document.getElementById('view-docs').style.display = 'flex';
     loadDocsCollections();
-  } else if(v==='settings') {
-    document.getElementById('view-settings').style.display = 'flex';
-    loadCITokens();
   } else if(v==='monitor') {
     document.getElementById('view-monitor').style.display = 'flex';
     loadMonitors();
   }
+}
+
+function openSettingsModal() {
+  openModal('settings-modal');
+  loadCITokens();
+  switchSettingsTab('cicd');
+}
+
+function switchSettingsTab(tab) {
+  const tabs = ['cicd', 'backup', 'appearance'];
+  tabs.forEach(t => {
+    document.getElementById(`settings-tab-${t}`).classList.toggle('active', t === tab);
+    document.getElementById(`settings-tab-${t}`).style.borderLeftColor = t === tab ? 'var(--acc)' : 'transparent';
+    document.getElementById(`settings-pane-${t}`).style.display = t === tab ? 'block' : 'none';
+  });
 }
 
 function sidebarTab(t){
